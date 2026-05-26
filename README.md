@@ -1,2 +1,1 @@
 # mail-manage
-mail-manage
