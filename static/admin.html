@@ -1,0 +1,323 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Mail Code Admin</title>
+  <style>
+    :root { color-scheme: light; font-family: Inter, Arial, "Microsoft YaHei", sans-serif; background: #f3f6fb; color: #111827; }
+    * { box-sizing: border-box; }
+    body { margin: 0; }
+    main { max-width: 1280px; margin: 0 auto; padding: 26px 18px 52px; }
+    .topbar { display: flex; justify-content: space-between; gap: 16px; align-items: center; margin-bottom: 18px; }
+    .brand { display: flex; align-items: center; gap: 12px; }
+    .logo { width: 40px; height: 40px; border-radius: 8px; background: #111827; color: #fff; display: grid; place-items: center; font-weight: 800; }
+    h1 { margin: 0; font-size: 24px; }
+    h2 { margin: 0 0 12px; font-size: 17px; }
+    .muted { color: #64748b; font-size: 13px; }
+    .grid { display: grid; grid-template-columns: 420px minmax(0, 1fr); gap: 16px; align-items: start; }
+    .panel { background: #fff; border: 1px solid #d9e0ea; border-radius: 8px; padding: 18px; box-shadow: 0 12px 30px rgba(15,23,42,.07); margin-bottom: 16px; }
+    label { display: grid; gap: 6px; font-size: 13px; color: #334155; margin-top: 11px; }
+    input, textarea, select, button {
+      width: 100%; border: 1px solid #c8d2df; border-radius: 7px; padding: 10px 11px;
+      font: inherit; background: #fff; color: #0f172a;
+    }
+    textarea { min-height: 140px; resize: vertical; font-family: Consolas, monospace; }
+    button { background: #1f6feb; border-color: #1f6feb; color: #fff; font-weight: 700; cursor: pointer; }
+    button.secondary { background: #fff; color: #1f6feb; }
+    button.danger { background: #b42318; border-color: #b42318; }
+    button:disabled { opacity: .62; cursor: wait; }
+    .inline { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+    .stats { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; margin-bottom: 16px; }
+    .stat { background: #fff; border: 1px solid #d9e0ea; border-radius: 8px; padding: 14px; }
+    .stat b { display: block; font-size: 24px; }
+    table { width: 100%; border-collapse: collapse; font-size: 13px; }
+    th, td { border-bottom: 1px solid #e2e8f0; padding: 10px 8px; text-align: left; vertical-align: top; }
+    th { color: #64748b; font-weight: 700; background: #f8fafc; }
+    .mono { font-family: Consolas, monospace; }
+    .pill { display: inline-flex; border-radius: 999px; padding: 3px 8px; background: #eef2ff; color: #3730a3; font-size: 12px; }
+    .pill.off { background: #fee2e2; color: #991b1b; }
+    .actions { display: flex; gap: 6px; flex-wrap: wrap; }
+    .actions button { width: auto; padding: 7px 9px; font-size: 12px; }
+    .toast { min-height: 22px; color: #b42318; font-size: 13px; margin-top: 10px; white-space: pre-wrap; }
+    .secret { background: #ecfdf3; border: 1px solid #abefc6; color: #065f46; border-radius: 8px; padding: 12px; margin-top: 12px; word-break: break-all; }
+    .hidden { display: none; }
+    @media (max-width: 980px) {
+      .grid { grid-template-columns: 1fr; }
+      .stats { grid-template-columns: 1fr; }
+      .topbar { align-items: flex-start; flex-direction: column; }
+    }
+  </style>
+</head>
+<body>
+<main>
+  <div class="topbar">
+    <div class="brand">
+      <div class="logo">AD</div>
+      <div>
+        <h1>邮箱取码管理后台</h1>
+        <div class="muted">批量导入邮箱、生成用户取件凭证、管理商业服务可用状态。</div>
+      </div>
+    </div>
+    <a class="muted" href="/">用户取件页</a>
+  </div>
+
+  <section id="loginPanel" class="panel">
+    <h2>管理员登录</h2>
+    <label>后台密码
+      <input id="adminPassword" type="password" autocomplete="current-password" placeholder="MAIL_CODE_ADMIN_PASSWORD" />
+    </label>
+    <button id="adminLoginBtn" type="button" style="margin-top:12px;">登录后台</button>
+    <div id="loginError" class="toast"></div>
+  </section>
+
+  <section id="dashboard" class="hidden">
+    <div class="stats">
+      <div class="stat"><span class="muted">邮箱账号</span><b id="statAccounts">0</b></div>
+      <div class="stat"><span class="muted">取件凭证</span><b id="statGrants">0</b></div>
+      <div class="stat"><span class="muted">启用邮箱</span><b id="statEnabled">0</b></div>
+    </div>
+
+    <div class="grid">
+      <div>
+        <section class="panel">
+          <h2>批量导入邮箱</h2>
+          <label>账号类型
+            <select id="importProvider">
+              <option value="hotmail">Hotmail / Outlook OAuth</option>
+              <option value="custom-imap">自定义域名 IMAP</option>
+            </select>
+          </label>
+          <label>默认文件夹
+            <input id="importMailboxes" value="INBOX,Junk" />
+          </label>
+          <label>默认发件人过滤
+            <input id="importSenderFilters" placeholder="noreply@example.com, verify@x.com" />
+          </label>
+          <label>导入内容
+            <textarea id="importText" placeholder="Hotmail: email----password----clientId----refreshToken&#10;IMAP: email----username----password----imapHost----imapPort"></textarea>
+          </label>
+          <button id="importBtn" type="button" style="margin-top:12px;">导入账号</button>
+          <div id="importError" class="toast"></div>
+        </section>
+
+        <section class="panel">
+          <h2>生成用户取件凭证</h2>
+          <label>选择邮箱
+            <select id="grantAccount"></select>
+          </label>
+          <label>客户备注
+            <input id="grantName" placeholder="订单号 / 用户名 / 备注" />
+          </label>
+          <div class="inline">
+            <label>有效天数
+              <input id="grantDays" type="number" min="0" value="7" />
+            </label>
+            <label>最大取件次数
+              <input id="grantMaxReads" type="number" min="0" value="0" />
+            </label>
+          </div>
+          <button id="createGrantBtn" type="button" style="margin-top:12px;">生成凭证</button>
+          <div id="createdSecret" class="secret hidden"></div>
+          <div id="grantError" class="toast"></div>
+        </section>
+      </div>
+
+      <div>
+        <section class="panel">
+          <h2>邮箱账号</h2>
+          <table>
+            <thead>
+              <tr><th>邮箱</th><th>类型</th><th>状态</th><th>最后检查</th><th>操作</th></tr>
+            </thead>
+            <tbody id="accountsBody"></tbody>
+          </table>
+        </section>
+
+        <section class="panel">
+          <h2>用户取件凭证</h2>
+          <table>
+            <thead>
+              <tr><th>备注</th><th>绑定邮箱</th><th>次数</th><th>状态</th><th>操作</th></tr>
+            </thead>
+            <tbody id="grantsBody"></tbody>
+          </table>
+        </section>
+      </div>
+    </div>
+  </section>
+</main>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const splitList = (value) => String(value || '').split(',').map((item) => item.trim()).filter(Boolean);
+let adminToken = localStorage.getItem('mailCodeAdminToken') || '';
+let state = { accounts: [], grants: [] };
+
+function fmtTime(ms) {
+  const value = Number(ms || 0);
+  return value ? new Date(value).toLocaleString('zh-CN', { hour12: false }) : '-';
+}
+
+function setError(id, message) {
+  $(id).textContent = message || '';
+}
+
+async function api(path, body, method = 'POST') {
+  const response = await fetch(path, {
+    method,
+    headers: {
+      'Content-Type': 'application/json',
+      ...(adminToken ? { Authorization: `Bearer ${adminToken}` } : {}),
+    },
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  const text = await response.text();
+  let data = {};
+  try { data = text ? JSON.parse(text) : {}; } catch { data = { raw: text }; }
+  if (!response.ok || data.ok === false) throw new Error(data.error || text || `HTTP ${response.status}`);
+  return data;
+}
+
+async function refresh() {
+  const data = await api('/api/admin/overview', null, 'GET');
+  state = data;
+  render();
+}
+
+function render() {
+  $('dashboard').classList.remove('hidden');
+  $('loginPanel').classList.add('hidden');
+  $('statAccounts').textContent = state.accounts.length;
+  $('statGrants').textContent = state.grants.length;
+  $('statEnabled').textContent = state.accounts.filter((item) => item.enabled).length;
+
+  $('grantAccount').innerHTML = state.accounts.map((account) =>
+    `<option value="${account.id}">${account.email} (${account.provider})</option>`
+  ).join('');
+
+  $('accountsBody').innerHTML = state.accounts.map((account) => `
+    <tr>
+      <td><div class="mono">${account.email}</div><div class="muted">${account.label || ''}</div>${account.lastError ? `<div class="toast">${account.lastError}</div>` : ''}</td>
+      <td>${account.provider}</td>
+      <td><span class="pill ${account.enabled ? '' : 'off'}">${account.enabled ? account.status : 'disabled'}</span></td>
+      <td>${fmtTime(account.lastCheckedAt)}</td>
+      <td>
+        <div class="actions">
+          <button class="secondary" data-account-toggle="${account.id}">${account.enabled ? '禁用' : '启用'}</button>
+          <button class="danger" data-account-delete="${account.id}">删除</button>
+        </div>
+      </td>
+    </tr>
+  `).join('');
+
+  $('grantsBody').innerHTML = state.grants.map((grant) => {
+    const limit = grant.maxReads ? `${grant.readCount}/${grant.maxReads}` : `${grant.readCount}/不限`;
+    return `
+      <tr>
+        <td>${grant.name || '-'}<div class="muted mono">${grant.id}</div></td>
+        <td><span class="mono">${grant.account?.email || grant.accountId}</span></td>
+        <td>${limit}<div class="muted">过期：${grant.expiresAt ? fmtTime(grant.expiresAt) : '永不过期'}</div></td>
+        <td><span class="pill ${grant.enabled ? '' : 'off'}">${grant.enabled ? 'enabled' : 'disabled'}</span></td>
+        <td>
+          <div class="actions">
+            <button class="secondary" data-grant-toggle="${grant.id}">${grant.enabled ? '禁用' : '启用'}</button>
+            <button class="danger" data-grant-delete="${grant.id}">删除</button>
+          </div>
+        </td>
+      </tr>
+    `;
+  }).join('');
+}
+
+$('adminLoginBtn').addEventListener('click', async () => {
+  setError('loginError', '');
+  try {
+    const data = await api('/api/admin/login', { password: $('adminPassword').value });
+    adminToken = data.token;
+    localStorage.setItem('mailCodeAdminToken', adminToken);
+    await refresh();
+  } catch (error) {
+    setError('loginError', error.message);
+  }
+});
+
+$('importBtn').addEventListener('click', async () => {
+  setError('importError', '');
+  try {
+    const data = await api('/api/admin/accounts/import', {
+      provider: $('importProvider').value,
+      mailboxes: splitList($('importMailboxes').value),
+      senderFilters: splitList($('importSenderFilters').value),
+      text: $('importText').value,
+    });
+    state.accounts = data.accounts;
+    $('importText').value = '';
+    render();
+  } catch (error) {
+    setError('importError', error.message);
+  }
+});
+
+$('createGrantBtn').addEventListener('click', async () => {
+  setError('grantError', '');
+  $('createdSecret').classList.add('hidden');
+  try {
+    const data = await api('/api/admin/grants/create', {
+      accountId: $('grantAccount').value,
+      name: $('grantName').value,
+      expiresInDays: Number($('grantDays').value || 0),
+      maxReads: Number($('grantMaxReads').value || 0),
+    });
+    state.grants = data.grants;
+    $('createdSecret').textContent = `请立即复制给用户，后台不会再次显示：${data.accessCode}`;
+    $('createdSecret').classList.remove('hidden');
+    render();
+  } catch (error) {
+    setError('grantError', error.message);
+  }
+});
+
+document.addEventListener('click', async (event) => {
+  const accountToggle = event.target.dataset.accountToggle;
+  const accountDelete = event.target.dataset.accountDelete;
+  const grantToggle = event.target.dataset.grantToggle;
+  const grantDelete = event.target.dataset.grantDelete;
+  try {
+    if (accountToggle) {
+      const account = state.accounts.find((item) => item.id === accountToggle);
+      const data = await api('/api/admin/accounts/patch', { accountId: accountToggle, updates: { enabled: !account.enabled } });
+      state.accounts = data.accounts;
+      render();
+    }
+    if (accountDelete && confirm('确认删除这个邮箱账号及其全部取件凭证？')) {
+      const data = await api('/api/admin/accounts/delete', { accountId: accountDelete });
+      state.accounts = data.accounts;
+      state.grants = data.grants;
+      render();
+    }
+    if (grantToggle) {
+      const grant = state.grants.find((item) => item.id === grantToggle);
+      const data = await api('/api/admin/grants/patch', { grantId: grantToggle, updates: { enabled: !grant.enabled } });
+      state.grants = data.grants;
+      render();
+    }
+    if (grantDelete && confirm('确认删除这个用户取件凭证？')) {
+      const data = await api('/api/admin/grants/delete', { grantId: grantDelete });
+      state.grants = data.grants;
+      render();
+    }
+  } catch (error) {
+    alert(error.message);
+  }
+});
+
+if (adminToken) {
+  refresh().catch(() => {
+    adminToken = '';
+    localStorage.removeItem('mailCodeAdminToken');
+  });
+}
+</script>
+</body>
+</html>

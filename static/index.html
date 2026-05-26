@@ -1,0 +1,225 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>邮箱验证码取件</title>
+  <style>
+    :root {
+      color-scheme: light;
+      font-family: Inter, Arial, "Microsoft YaHei", sans-serif;
+      background: #eef2f7;
+      color: #111827;
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; min-height: 100vh; background: linear-gradient(180deg, #f8fafc 0%, #e9eef6 100%); }
+    main { max-width: 1120px; margin: 0 auto; padding: 32px 18px 52px; }
+    .topbar { display: flex; justify-content: space-between; align-items: center; gap: 16px; margin-bottom: 22px; }
+    .brand { display: flex; align-items: center; gap: 12px; }
+    .logo { width: 40px; height: 40px; border-radius: 8px; display: grid; place-items: center; background: #1f6feb; color: #fff; font-weight: 800; }
+    h1 { margin: 0; font-size: 24px; letter-spacing: 0; }
+    .muted { color: #64748b; font-size: 14px; }
+    .shell { display: grid; grid-template-columns: 380px minmax(0, 1fr); gap: 18px; align-items: start; }
+    .panel { background: rgba(255,255,255,.92); border: 1px solid #d9e0ea; border-radius: 8px; box-shadow: 0 12px 32px rgba(15, 23, 42, .08); padding: 20px; }
+    .panel h2 { margin: 0 0 6px; font-size: 18px; }
+    label { display: grid; gap: 7px; font-size: 13px; color: #334155; margin-top: 14px; }
+    input, button {
+      width: 100%;
+      border: 1px solid #c8d2df;
+      border-radius: 7px;
+      padding: 11px 12px;
+      font: inherit;
+      background: #fff;
+      color: #0f172a;
+    }
+    input:focus { outline: 2px solid rgba(31,111,235,.18); border-color: #1f6feb; }
+    button { background: #1f6feb; color: #fff; border-color: #1f6feb; font-weight: 700; cursor: pointer; }
+    button.secondary { background: #fff; color: #1f6feb; }
+    button:disabled { opacity: .62; cursor: wait; }
+    .actions { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 16px; }
+    .account-card { display: grid; gap: 8px; margin-top: 16px; padding: 14px; border: 1px solid #d9e0ea; border-radius: 8px; background: #f8fafc; }
+    .email { font-family: Consolas, monospace; font-weight: 700; word-break: break-all; }
+    .code-box { min-height: 200px; display: grid; place-items: center; text-align: center; border: 1px dashed #bcc8d8; border-radius: 8px; background: #f8fafc; }
+    .code { font-size: clamp(42px, 7vw, 72px); line-height: 1; font-weight: 900; color: #0f766e; letter-spacing: 4px; }
+    .message { width: 100%; margin-top: 16px; border-collapse: collapse; font-size: 13px; }
+    .message th, .message td { padding: 10px 8px; border-bottom: 1px solid #e2e8f0; text-align: left; vertical-align: top; }
+    .message th { color: #64748b; font-weight: 700; width: 110px; }
+    pre { margin: 16px 0 0; max-height: 280px; overflow: auto; background: #0b1020; color: #dbeafe; border-radius: 8px; padding: 14px; white-space: pre-wrap; }
+    .hidden { display: none; }
+    .toast { min-height: 22px; margin-top: 12px; color: #b42318; font-size: 13px; }
+    @media (max-width: 820px) {
+      .shell { grid-template-columns: 1fr; }
+      .topbar { align-items: flex-start; flex-direction: column; }
+    }
+  </style>
+</head>
+<body>
+<main>
+  <div class="topbar">
+    <div class="brand">
+      <div class="logo">MC</div>
+      <div>
+        <h1>邮箱验证码取件</h1>
+        <div class="muted">输入商户提供的取件凭证，读取已分配邮箱中的最新验证码。</div>
+      </div>
+    </div>
+    <a class="muted" href="/admin">管理员后台</a>
+  </div>
+
+  <div class="shell">
+    <section class="panel">
+      <h2>取件凭证</h2>
+      <div class="muted">凭证通常在购买后由商户发放。凭证只允许访问绑定邮箱，不会展示邮箱 token 或密码。</div>
+      <label>Access Code
+        <input id="accessCode" autocomplete="off" placeholder="mc_xxxxxxxxxxxxxxxxx" />
+      </label>
+      <button id="loginBtn" type="button" style="margin-top:14px;">登录取件</button>
+      <div id="loginError" class="toast"></div>
+
+      <div id="accountCard" class="account-card hidden">
+        <div class="muted">当前邮箱</div>
+        <div id="accountEmail" class="email"></div>
+        <div id="grantInfo" class="muted"></div>
+      </div>
+
+      <div class="actions">
+        <button id="fetchCodeBtn" type="button" disabled>获取验证码</button>
+        <button id="fetchMessagesBtn" type="button" class="secondary" disabled>查看邮件</button>
+      </div>
+      <button id="logoutBtn" type="button" class="secondary hidden" style="margin-top:10px;">退出登录</button>
+    </section>
+
+    <section class="panel">
+      <h2>最新验证码</h2>
+      <div class="code-box">
+        <div>
+          <div id="code" class="code">------</div>
+          <div id="statusText" class="muted">等待登录</div>
+        </div>
+      </div>
+      <table id="messageTable" class="message hidden">
+        <tbody>
+          <tr><th>发件人</th><td id="msgSender"></td></tr>
+          <tr><th>标题</th><td id="msgSubject"></td></tr>
+          <tr><th>时间</th><td id="msgTime"></td></tr>
+          <tr><th>预览</th><td id="msgPreview"></td></tr>
+        </tbody>
+      </table>
+      <pre id="debug" class="hidden"></pre>
+    </section>
+  </div>
+</main>
+
+<script>
+const $ = (id) => document.getElementById(id);
+let token = localStorage.getItem('mailCodeUserToken') || '';
+
+function setBusy(busy) {
+  $('loginBtn').disabled = busy;
+  $('fetchCodeBtn').disabled = busy || !token;
+  $('fetchMessagesBtn').disabled = busy || !token;
+}
+
+function showMessage(message) {
+  $('loginError').textContent = message || '';
+}
+
+function renderAccount(data) {
+  if (!data || !data.account) return;
+  $('accountCard').classList.remove('hidden');
+  $('accountEmail').textContent = data.account.email || data.account.targetEmail || '(未命名邮箱)';
+  const grant = data.grant || {};
+  const limit = grant.maxReads ? `${grant.readCount || 0}/${grant.maxReads}` : `${grant.readCount || 0}/不限`;
+  $('grantInfo').textContent = `已取 ${limit}`;
+  $('fetchCodeBtn').disabled = false;
+  $('fetchMessagesBtn').disabled = false;
+  $('logoutBtn').classList.remove('hidden');
+  $('statusText').textContent = '已登录，可以获取验证码';
+}
+
+async function api(path, body) {
+  const response = await fetch(path, {
+    method: body ? 'POST' : 'GET',
+    headers: {
+      'Content-Type': 'application/json',
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    },
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  const text = await response.text();
+  let data = {};
+  try { data = text ? JSON.parse(text) : {}; } catch { data = { raw: text }; }
+  if (!response.ok || data.ok === false) throw new Error(data.error || text || `HTTP ${response.status}`);
+  return data;
+}
+
+function renderCode(data) {
+  $('code').textContent = data.code || '未找到';
+  $('statusText').textContent = data.code ? `通过 ${data.transport || data.provider || 'mail'} 获取` : '没有匹配到验证码';
+  const message = data.message || {};
+  $('messageTable').classList.toggle('hidden', !message.subject && !message.bodyPreview);
+  $('msgSender').textContent = message.from?.emailAddress?.address || '';
+  $('msgSubject').textContent = message.subject || '';
+  $('msgTime').textContent = message.receivedDateTime || '';
+  $('msgPreview').textContent = message.bodyPreview || '';
+}
+
+$('loginBtn').addEventListener('click', async () => {
+  showMessage('');
+  setBusy(true);
+  try {
+    const data = await api('/api/user/login', { accessCode: $('accessCode').value.trim() });
+    token = data.token;
+    localStorage.setItem('mailCodeUserToken', token);
+    renderAccount(data);
+  } catch (error) {
+    showMessage(error.message);
+  } finally {
+    setBusy(false);
+  }
+});
+
+$('fetchCodeBtn').addEventListener('click', async () => {
+  showMessage('');
+  setBusy(true);
+  $('statusText').textContent = '正在读取邮箱...';
+  try {
+    renderCode(await api('/api/user/code', {}));
+    api('/api/user/me').then(renderAccount).catch(() => {});
+  } catch (error) {
+    showMessage(error.message);
+    $('statusText').textContent = '取码失败';
+  } finally {
+    setBusy(false);
+  }
+});
+
+$('fetchMessagesBtn').addEventListener('click', async () => {
+  showMessage('');
+  setBusy(true);
+  try {
+    const data = await api('/api/user/messages', {});
+    $('debug').classList.remove('hidden');
+    $('debug').textContent = JSON.stringify(data.messages || [], null, 2);
+  } catch (error) {
+    showMessage(error.message);
+  } finally {
+    setBusy(false);
+  }
+});
+
+$('logoutBtn').addEventListener('click', () => {
+  token = '';
+  localStorage.removeItem('mailCodeUserToken');
+  location.reload();
+});
+
+if (token) {
+  api('/api/user/me').then(renderAccount).catch(() => {
+    token = '';
+    localStorage.removeItem('mailCodeUserToken');
+  });
+}
+</script>
+</body>
+</html>
