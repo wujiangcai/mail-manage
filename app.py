@@ -271,6 +271,24 @@ def init_db():
                 updated_at INTEGER NOT NULL,
                 FOREIGN KEY(account_id) REFERENCES mail_accounts(id) ON DELETE CASCADE
             );
+
+            CREATE TABLE IF NOT EXISTS mail_message_logs (
+                id TEXT PRIMARY KEY,
+                account_id TEXT NOT NULL,
+                message_key TEXT NOT NULL,
+                mailbox TEXT NOT NULL DEFAULT '',
+                sender TEXT NOT NULL DEFAULT '',
+                recipients TEXT NOT NULL DEFAULT '[]',
+                subject TEXT NOT NULL DEFAULT '',
+                body_preview TEXT NOT NULL DEFAULT '',
+                received_at TEXT NOT NULL DEFAULT '',
+                received_timestamp INTEGER NOT NULL DEFAULT 0,
+                code TEXT NOT NULL DEFAULT '',
+                fetched_at INTEGER NOT NULL,
+                raw_json TEXT NOT NULL DEFAULT '{}',
+                UNIQUE(account_id, message_key, mailbox),
+                FOREIGN KEY(account_id) REFERENCES mail_accounts(id) ON DELETE CASCADE
+            );
             """
         )
 
@@ -1016,6 +1034,96 @@ def get_message_search_text(message):
     ])
 
 
+def message_sender(message):
+    return str(message.get("from", {}).get("emailAddress", {}).get("address", "")).strip()
+
+
+def message_recipients(message):
+    recipients = message.get("recipients", {}) if isinstance(message.get("recipients"), dict) else {}
+    values = recipients.get("all", []) if isinstance(recipients.get("all"), list) else []
+    return [str(item or "").strip() for item in values if str(item or "").strip()]
+
+
+def filter_messages_for_payload(messages, filters):
+    sender_keywords = [str(item).strip().lower() for item in filters.get("senderFilters") or [] if str(item).strip()]
+    subject_keywords = [str(item).strip().lower() for item in filters.get("subjectFilters") or [] if str(item).strip()]
+    required_keywords = [str(item).strip().lower() for item in filters.get("requiredKeywords") or [] if str(item).strip()]
+    recipient_keywords = [str(item).strip().lower() for item in filters.get("recipientFilters") or [] if str(item).strip()]
+    target_email = str(filters.get("targetEmail") or filters.get("target_email") or "").strip().lower()
+    if target_email:
+        recipient_keywords.append(target_email)
+    if not (sender_keywords or subject_keywords or required_keywords or recipient_keywords):
+        return list(messages or [])
+
+    filtered = []
+    for message in messages or []:
+        sender = message_sender(message).lower()
+        subject = str(message.get("subject") or "").lower()
+        preview = str(message.get("bodyPreview") or "").lower()
+        recipients = " ".join(message_recipients(message)).lower()
+        search_text = get_message_search_text(message).lower()
+        combined = " ".join([sender, subject, preview, recipients, search_text])
+        if recipient_keywords and not any(keyword in recipients for keyword in recipient_keywords):
+            continue
+        sender_ok = bool(sender_keywords) and any(keyword in combined for keyword in sender_keywords)
+        subject_ok = bool(subject_keywords) and any(keyword in combined for keyword in subject_keywords)
+        keyword_ok = bool(required_keywords) and any(keyword in combined for keyword in required_keywords)
+        if (sender_keywords or subject_keywords or required_keywords) and not sender_ok and not subject_ok and not keyword_ok:
+            continue
+        filtered.append(message)
+    return filtered
+
+
+def save_message_logs(conn, account_id, messages, filters=None):
+    filters = filters or {}
+    timestamp = now_ms()
+    rows = []
+    for message in messages or []:
+        message_key = str(message.get("id") or message.get("internetMessageId") or "").strip()
+        if not message_key:
+            message_key = hash_secret(json_dumps(message))
+        code = extract_code(get_message_search_text(message), filters.get("codePatterns") or [])
+        row = {
+            "id": generate_id("msg"),
+            "account_id": account_id,
+            "message_key": message_key[:240],
+            "mailbox": str(message.get("mailbox") or ""),
+            "sender": message_sender(message),
+            "recipients": json_dumps(message_recipients(message)),
+            "subject": str(message.get("subject") or "")[:500],
+            "body_preview": str(message.get("bodyPreview") or "")[:1200],
+            "received_at": str(message.get("receivedDateTime") or ""),
+            "received_timestamp": int(message.get("receivedTimestamp") or 0),
+            "code": code[:64],
+            "fetched_at": timestamp,
+            "raw_json": json_dumps(message),
+        }
+        rows.append(row)
+        conn.execute(
+            """
+            INSERT INTO mail_message_logs (
+              id, account_id, message_key, mailbox, sender, recipients, subject,
+              body_preview, received_at, received_timestamp, code, fetched_at, raw_json
+            ) VALUES (
+              :id, :account_id, :message_key, :mailbox, :sender, :recipients, :subject,
+              :body_preview, :received_at, :received_timestamp, :code, :fetched_at, :raw_json
+            )
+            ON CONFLICT(account_id, message_key, mailbox) DO UPDATE SET
+              sender = excluded.sender,
+              recipients = excluded.recipients,
+              subject = excluded.subject,
+              body_preview = excluded.body_preview,
+              received_at = excluded.received_at,
+              received_timestamp = excluded.received_timestamp,
+              code = excluded.code,
+              fetched_at = excluded.fetched_at,
+              raw_json = excluded.raw_json
+            """,
+            row,
+        )
+    return rows
+
+
 def select_latest_code(messages, filters):
     sender_keywords = [str(item).strip().lower() for item in filters.get("senderFilters") or [] if str(item).strip()]
     subject_keywords = [str(item).strip().lower() for item in filters.get("subjectFilters") or [] if str(item).strip()]
@@ -1109,6 +1217,7 @@ def account_row_to_payload(row, extra_filters=None):
             "provider": "hotmail",
             "clientId": row["client_id"],
             "refreshToken": row["refresh_token"],
+            "targetEmail": row["target_email"] or "",
         })
     return payload
 
@@ -1225,6 +1334,68 @@ def list_grants(conn):
         }
         results.append(safe_grant(row, account=None) | {"account": account})
     return results
+
+
+def safe_message_log(row):
+    account = {
+        "id": row["a_id"],
+        "provider": row["a_provider"],
+        "label": row["a_label"],
+        "email": row["a_email"],
+        "targetEmail": row["a_target_email"],
+    } if "a_id" in row.keys() and row["a_id"] else None
+    return {
+        "id": row["id"],
+        "accountId": row["account_id"],
+        "messageKey": row["message_key"],
+        "mailbox": row["mailbox"],
+        "sender": row["sender"],
+        "recipients": json_loads(row["recipients"], []),
+        "subject": row["subject"],
+        "bodyPreview": row["body_preview"],
+        "receivedDateTime": row["received_at"],
+        "receivedTimestamp": row["received_timestamp"],
+        "code": row["code"],
+        "fetchedAt": row["fetched_at"],
+        "account": account,
+    }
+
+
+def list_message_logs(conn, account_id="", limit=100):
+    limit = max(1, min(int(limit or 100), 500))
+    params = []
+    where = ""
+    if account_id:
+        where = "WHERE m.account_id = ?"
+        params.append(account_id)
+    rows = conn.execute(
+        f"""
+        SELECT
+          m.*,
+          a.id AS a_id,
+          a.provider AS a_provider,
+          a.label AS a_label,
+          a.email AS a_email,
+          a.target_email AS a_target_email
+        FROM mail_message_logs m
+        JOIN mail_accounts a ON a.id = m.account_id
+        {where}
+        ORDER BY COALESCE(NULLIF(m.received_timestamp, 0), m.fetched_at) DESC, m.fetched_at DESC
+        LIMIT ?
+        """,
+        [*params, limit],
+    ).fetchall()
+    return [safe_message_log(row) for row in rows]
+
+
+def admin_fetch_account_messages(conn, account, top=FETCH_LIMIT_DEFAULT):
+    request_payload = account_row_to_payload(account, {"top": top})
+    result = collect_messages(request_payload)
+    messages = filter_messages_for_payload(result.get("messages") or [], request_payload)
+    result["messages"] = messages
+    save_message_logs(conn, account["id"], messages, request_payload)
+    update_account_after_fetch(conn, account["id"], result=result)
+    return result
 
 
 def parse_import_lines(text, provider, options=None):
@@ -1393,6 +1564,23 @@ class MailCodeHandler(BaseHTTPRequestHandler):
                         "ok": True,
                         "accounts": list_accounts(conn),
                         "grants": list_grants(conn),
+                        "messages": list_message_logs(conn, limit=100),
+                    })
+            except PermissionError as exc:
+                json_response(self, 401, {"ok": False, "error": str(exc)})
+            except Exception as exc:
+                json_response(self, 500, {"ok": False, "error": str(exc)})
+            return
+        if path == "/api/admin/messages":
+            try:
+                require_admin_session(self)
+                query = parse_qs(urlparse(self.path).query)
+                account_id = str((query.get("accountId") or [""])[0] or "").strip()
+                limit = int((query.get("limit") or ["100"])[0] or 100)
+                with db_connect() as conn:
+                    json_response(self, 200, {
+                        "ok": True,
+                        "messages": list_message_logs(conn, account_id=account_id, limit=limit),
                     })
             except PermissionError as exc:
                 json_response(self, 401, {"ok": False, "error": str(exc)})
@@ -1488,6 +1676,8 @@ class MailCodeHandler(BaseHTTPRequestHandler):
             })
         except PermissionError as exc:
             json_response(self, 401, {"ok": False, "error": str(exc)})
+        except ValueError as exc:
+            json_response(self, 400, {"ok": False, "error": str(exc)})
         except Exception as exc:
             traceback.print_exc()
             json_response(self, 500, {"ok": False, "error": str(exc)})
@@ -1522,6 +1712,7 @@ class MailCodeHandler(BaseHTTPRequestHandler):
                     "subjectFilters": ("subject_filters", json_dumps),
                     "requiredKeywords": ("required_keywords", json_dumps),
                     "mailboxes": ("mailboxes", json_dumps),
+                    "targetEmail": ("target_email", str),
                 }
                 assignments = []
                 values = []
@@ -1537,7 +1728,41 @@ class MailCodeHandler(BaseHTTPRequestHandler):
                     values.append(account_id)
                     conn.execute(f"UPDATE mail_accounts SET {', '.join(assignments)} WHERE id = ?", values)
                     conn.commit()
-                json_response(self, 200, {"ok": True, "accounts": list_accounts(conn)})
+                json_response(self, 200, {
+                    "ok": True,
+                    "accounts": list_accounts(conn),
+                    "messages": list_message_logs(conn, limit=100),
+                })
+                return
+
+            if path == "/api/admin/messages/fetch":
+                account_id = str(payload.get("accountId") or payload.get("id") or "").strip()
+                top = max(1, min(int(payload.get("top") or FETCH_LIMIT_DEFAULT), 30))
+                accounts = [load_account(conn, account_id)] if account_id else conn.execute(
+                    "SELECT * FROM mail_accounts WHERE enabled = 1 ORDER BY created_at DESC"
+                ).fetchall()
+                fetched = []
+                errors = []
+                for account in accounts:
+                    try:
+                        result = admin_fetch_account_messages(conn, account, top=top)
+                        fetched.append({
+                            "accountId": account["id"],
+                            "email": account["email"],
+                            "count": len(result.get("messages") or []),
+                            "transport": result.get("transport") or "",
+                        })
+                    except Exception as exc:
+                        update_account_after_fetch(conn, account["id"], error=exc)
+                        errors.append({"accountId": account["id"], "email": account["email"], "error": compact_text(exc)})
+                conn.commit()
+                json_response(self, 200, {
+                    "ok": True,
+                    "fetched": fetched,
+                    "errors": errors,
+                    "accounts": list_accounts(conn),
+                    "messages": list_message_logs(conn, limit=100),
+                })
                 return
 
             if path == "/api/admin/accounts/delete":
@@ -1546,7 +1771,12 @@ class MailCodeHandler(BaseHTTPRequestHandler):
                     raise RuntimeError("Missing accountId")
                 conn.execute("DELETE FROM mail_accounts WHERE id = ?", (account_id,))
                 conn.commit()
-                json_response(self, 200, {"ok": True, "accounts": list_accounts(conn), "grants": list_grants(conn)})
+                json_response(self, 200, {
+                    "ok": True,
+                    "accounts": list_accounts(conn),
+                    "grants": list_grants(conn),
+                    "messages": list_message_logs(conn, limit=100),
+                })
                 return
 
             if path == "/api/admin/grants/create":
@@ -1559,12 +1789,21 @@ class MailCodeHandler(BaseHTTPRequestHandler):
                 grant_id = str(payload.get("grantId") or payload.get("id") or "").strip()
                 if not grant_id:
                     raise RuntimeError("Missing grantId")
+                grant = conn.execute("SELECT * FROM access_grants WHERE id = ?", (grant_id,)).fetchone()
+                if not grant:
+                    raise ValueError("Access grant not found")
                 updates = payload.get("updates") if isinstance(payload.get("updates"), dict) else {}
+                if "accountId" in updates:
+                    target_account_id = str(updates.get("accountId") or "").strip()
+                    if not conn.execute("SELECT id FROM mail_accounts WHERE id = ?", (target_account_id,)).fetchone():
+                        raise ValueError("Account not found")
                 allowed = {
                     "enabled": ("enabled", lambda value: 1 if value else 0),
                     "name": ("name", str),
+                    "accountId": ("account_id", str),
                     "maxReads": ("max_reads", lambda value: max(0, int(value or 0))),
                     "expiresAt": ("expires_at", lambda value: max(0, int(value or 0))),
+                    "readCount": ("read_count", lambda value: max(0, int(value or 0))),
                 }
                 assignments = []
                 values = []
@@ -1581,6 +1820,23 @@ class MailCodeHandler(BaseHTTPRequestHandler):
                     conn.execute(f"UPDATE access_grants SET {', '.join(assignments)} WHERE id = ?", values)
                     conn.commit()
                 json_response(self, 200, {"ok": True, "grants": list_grants(conn)})
+                return
+
+            if path == "/api/admin/grants/regenerate":
+                grant_id = str(payload.get("grantId") or payload.get("id") or "").strip()
+                if not grant_id:
+                    raise RuntimeError("Missing grantId")
+                grant = conn.execute("SELECT * FROM access_grants WHERE id = ?", (grant_id,)).fetchone()
+                if not grant:
+                    raise ValueError("Access grant not found")
+                access_code = f"mc_{secrets.token_urlsafe(18)}"
+                timestamp = now_ms()
+                conn.execute(
+                    "UPDATE access_grants SET access_code_hash = ?, read_count = 0, updated_at = ? WHERE id = ?",
+                    (hash_secret(access_code), timestamp, grant_id),
+                )
+                conn.commit()
+                json_response(self, 200, {"ok": True, "accessCode": access_code, "grants": list_grants(conn)})
                 return
 
             if path == "/api/admin/grants/delete":
@@ -1601,7 +1857,9 @@ class MailCodeHandler(BaseHTTPRequestHandler):
             request_payload = account_row_to_payload(account, payload)
             try:
                 result = collect_messages(request_payload)
+                result["messages"] = filter_messages_for_payload(result.get("messages") or [], request_payload)
                 update_account_after_fetch(conn, account["id"], result=result)
+                save_message_logs(conn, account["id"], result.get("messages") or [], request_payload)
                 increment_grant_usage(conn, grant["id"])
                 conn.commit()
             except Exception as exc:

@@ -11,12 +11,31 @@ It provides:
 - Latest verification code: `POST /api/code`
 - User access-code login and mailbox-bound code fetching
 - Admin bulk mailbox import and access-code management
+- Admin unified mail-record view across all imported mailboxes
 - Hotmail / Outlook OAuth refresh-token fetching
 - Custom domain mailbox fetching over IMAP
+- Alias/catch-all mailbox fetching with recipient filtering
 - Optional API-key authentication
 
 The admin-managed service stores mailbox credentials in local SQLite so users can
 fetch codes with a purchase/access code instead of seeing mailbox secrets.
+
+## Web UI
+
+User page (`/`):
+
+- Login with an `mc_...` Access Code.
+- View the latest verification code in a large readable panel.
+- View recent mailbox messages as cards with sender, recipients, subject,
+  mailbox, preview, time, and detected code. The user page no longer exposes raw
+  JSON as the primary mail view.
+
+Admin page (`/admin`):
+
+- Import Hotmail/Outlook OAuth or custom IMAP accounts in bulk.
+- Edit account label, mailbox folders, filters, and `targetEmail` alias matching.
+- Refresh one mailbox or all enabled mailboxes and review stored message records.
+- Create, disable, edit, delete, reset read count, and regenerate Access Codes.
 
 ## Run Locally
 
@@ -68,7 +87,13 @@ For backward compatibility, `MAIL_CODE_HELPER_API_KEY` and
    the assigned mailbox only.
 
 The access code is displayed once when created. It is stored hashed in SQLite and
-cannot be recovered later; generate a new one if the customer loses it.
+cannot be recovered later. Admins can disable it, edit its mailbox binding,
+change expiry/max reads, clear read count, or regenerate a new code. Regenerating
+immediately invalidates the old code.
+
+The admin panel can refresh one mailbox or all enabled mailboxes. Fetched message
+summaries are stored in SQLite so the admin can review received mail records
+across accounts without logging into each mailbox provider.
 
 ## Admin Bulk Import Formats
 
@@ -87,6 +112,12 @@ alias@example.com----imap-username@example.com----app-password----imap.example.c
 For catch-all domain mailboxes, import one row per sellable alias. The service
 uses the imported email as `targetEmail`, so users only match messages sent to
 their assigned alias.
+
+Aliases are supported when the provider exposes the alias in message recipients
+(`To`, `Cc`, or `Bcc`). For custom IMAP catch-all mailboxes, use the same IMAP
+username/password on multiple imported rows and put each sellable alias in the
+first `email` field. For Microsoft mailboxes, set the account's `targetEmail` in
+the admin edit dialog when the login mailbox receives mail for another alias.
 
 ## Hotmail / Outlook Payload
 
@@ -162,6 +193,26 @@ Catch-all mailbox, filtering by recipient alias:
   }
 }
 ```
+
+## Admin Mail Records
+
+Admin-only endpoints:
+
+- `GET /api/admin/messages?accountId=acct_xxx&limit=100` returns stored message records.
+- `POST /api/admin/messages/fetch` refreshes messages for one account or all enabled accounts.
+- `POST /api/admin/grants/patch` edits Access Code status, name, binding, expiry, max reads, or read count.
+- `POST /api/admin/grants/regenerate` creates a new Access Code for an existing grant.
+
+`POST /api/admin/messages/fetch` body:
+
+```json
+{
+  "accountId": "acct_xxx",
+  "top": 10
+}
+```
+
+Omit `accountId` to refresh all enabled accounts.
 
 ## Nginx Example
 
