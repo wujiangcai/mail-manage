@@ -10,6 +10,7 @@ import os
 import re
 import secrets
 import sqlite3
+import threading
 import time
 import traceback
 from datetime import datetime, timezone
@@ -29,6 +30,9 @@ REQUEST_TIMEOUT_SECONDS = 45
 FETCH_LIMIT_DEFAULT = 10
 TOKEN_TTL_SECONDS = 12 * 60 * 60
 ADMIN_TOKEN_TTL_SECONDS = 24 * 60 * 60
+AUTO_POLL_INTERVAL_SECONDS_DEFAULT = 60
+AUTO_POLL_START_DELAY_SECONDS = 5
+WEBHOOK_TIMEOUT_SECONDS_DEFAULT = 8
 DEFAULT_DB_PATH = Path(__file__).with_name("data").joinpath("mail-code-helper.sqlite3")
 
 LIVE_TOKEN_URL = "https://login.live.com/oauth20_token.srf"
@@ -106,6 +110,60 @@ def get_api_keys():
 
 def get_allowed_origins():
     return split_env_list(os.environ.get("MAIL_CODE_ALLOWED_ORIGINS")) or ["*"]
+
+
+def get_auto_poll_interval_seconds():
+    raw_value = os.environ.get("MAIL_CODE_AUTO_POLL_INTERVAL_SECONDS")
+    if raw_value is None:
+        raw_value = os.environ.get("MAIL_CODE_POLL_INTERVAL_SECONDS")
+    try:
+        return max(0, int(str(raw_value if raw_value is not None else AUTO_POLL_INTERVAL_SECONDS_DEFAULT).strip()))
+    except (TypeError, ValueError):
+        return AUTO_POLL_INTERVAL_SECONDS_DEFAULT
+
+
+def get_auto_poll_top():
+    try:
+        return max(1, min(int(os.environ.get("MAIL_CODE_AUTO_POLL_TOP") or FETCH_LIMIT_DEFAULT), 30))
+    except (TypeError, ValueError):
+        return FETCH_LIMIT_DEFAULT
+
+
+def get_admin_refresh_interval_seconds():
+    try:
+        return max(3, int(os.environ.get("MAIL_CODE_ADMIN_REFRESH_INTERVAL_SECONDS") or 10))
+    except (TypeError, ValueError):
+        return 10
+
+
+def get_user_code_poll_config():
+    try:
+        interval = max(2, int(os.environ.get("MAIL_CODE_USER_CODE_POLL_INTERVAL_SECONDS") or 5))
+    except (TypeError, ValueError):
+        interval = 5
+    try:
+        timeout = max(interval, int(os.environ.get("MAIL_CODE_USER_CODE_POLL_TIMEOUT_SECONDS") or 90))
+    except (TypeError, ValueError):
+        timeout = 90
+    return {"intervalSeconds": interval, "timeoutSeconds": timeout}
+
+
+def get_webhook_urls():
+    return (
+        split_env_list(os.environ.get("MAIL_CODE_WEBHOOK_URLS"))
+        or split_env_list(os.environ.get("MAIL_CODE_WEBHOOK_URL"))
+    )
+
+
+def get_webhook_secret():
+    return str(os.environ.get("MAIL_CODE_WEBHOOK_SECRET") or "").strip()
+
+
+def get_webhook_timeout_seconds():
+    try:
+        return max(1, min(int(os.environ.get("MAIL_CODE_WEBHOOK_TIMEOUT_SECONDS") or WEBHOOK_TIMEOUT_SECONDS_DEFAULT), 30))
+    except (TypeError, ValueError):
+        return WEBHOOK_TIMEOUT_SECONDS_DEFAULT
 
 
 def resolve_cors_origin(handler):
@@ -190,6 +248,23 @@ def get_json(url, headers=None):
     request = Request(url, headers=headers or {})
     with urlopen(request, timeout=REQUEST_TIMEOUT_SECONDS) as response:
         return response.getcode(), json.loads(response.read().decode("utf-8"))
+
+
+def post_json(url, payload, headers=None, timeout=None):
+    body = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    request = Request(
+        url,
+        data=body,
+        headers={"Content-Type": "application/json; charset=utf-8", **(headers or {})},
+    )
+    with urlopen(request, timeout=timeout or REQUEST_TIMEOUT_SECONDS) as response:
+        raw = response.read().decode("utf-8", errors="ignore")
+        if not raw:
+            return response.getcode(), {}
+        try:
+            return response.getcode(), json.loads(raw)
+        except Exception:
+            return response.getcode(), {"raw": raw[:1000]}
 
 
 def mask_secret(value, keep=6):
@@ -1082,12 +1157,17 @@ def save_message_logs(conn, account_id, messages, filters=None):
         message_key = str(message.get("id") or message.get("internetMessageId") or "").strip()
         if not message_key:
             message_key = hash_secret(json_dumps(message))
+        mailbox = str(message.get("mailbox") or "")
+        existing = conn.execute(
+            "SELECT id, code FROM mail_message_logs WHERE account_id = ? AND message_key = ? AND mailbox = ?",
+            (account_id, message_key[:240], mailbox),
+        ).fetchone()
         code = extract_code(get_message_search_text(message), filters.get("codePatterns") or [])
         row = {
             "id": generate_id("msg"),
             "account_id": account_id,
             "message_key": message_key[:240],
-            "mailbox": str(message.get("mailbox") or ""),
+            "mailbox": mailbox,
             "sender": message_sender(message),
             "recipients": json_dumps(message_recipients(message)),
             "subject": str(message.get("subject") or "")[:500],
@@ -1097,6 +1177,8 @@ def save_message_logs(conn, account_id, messages, filters=None):
             "code": code[:64],
             "fetched_at": timestamp,
             "raw_json": json_dumps(message),
+            "is_new": not bool(existing),
+            "should_notify": bool(code) and (not existing or not str(existing["code"] or "").strip()),
         }
         rows.append(row)
         conn.execute(
@@ -1388,14 +1470,137 @@ def list_message_logs(conn, account_id="", limit=100):
     return [safe_message_log(row) for row in rows]
 
 
-def admin_fetch_account_messages(conn, account, top=FETCH_LIMIT_DEFAULT):
+def account_webhook_payload(account):
+    return {
+        "id": account["id"],
+        "provider": account["provider"],
+        "label": account["label"],
+        "email": account["email"],
+        "targetEmail": account["target_email"],
+    }
+
+
+def webhook_message_payload(row):
+    return {
+        "id": row["message_key"],
+        "mailbox": row["mailbox"],
+        "sender": row["sender"],
+        "recipients": json_loads(row["recipients"], []),
+        "subject": row["subject"],
+        "bodyPreview": row["body_preview"],
+        "receivedDateTime": row["received_at"],
+        "receivedTimestamp": row["received_timestamp"],
+        "code": row["code"],
+        "fetchedAt": row["fetched_at"],
+    }
+
+
+def webhook_headers(payload):
+    headers = {"X-Mail-Code-Event": str(payload.get("event") or "")}
+    secret = get_webhook_secret()
+    if secret:
+        body = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        signature = hmac.new(secret.encode("utf-8"), body, hashlib.sha256).hexdigest()
+        headers["X-Mail-Code-Signature"] = f"sha256={signature}"
+    return headers
+
+
+def dispatch_code_webhooks(account, log_rows, source="manual"):
+    urls = get_webhook_urls()
+    if not urls:
+        return {"sent": 0, "errors": []}
+    sent = 0
+    errors = []
+    account_payload = account_webhook_payload(account)
+    for row in log_rows or []:
+        if not row.get("should_notify"):
+            continue
+        payload = {
+            "event": "mail_code.detected",
+            "source": source,
+            "account": account_payload,
+            "message": webhook_message_payload(row),
+            "time": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        }
+        headers = webhook_headers(payload)
+        for url in urls:
+            try:
+                post_json(url, payload, headers=headers, timeout=get_webhook_timeout_seconds())
+                sent += 1
+            except Exception as exc:
+                detail = compact_text(exc)
+                errors.append({"url": mask_secret(url, keep=12), "error": detail})
+                log_info(f"webhook failed url={mask_secret(url, keep=12)} detail={detail}")
+    return {"sent": sent, "errors": errors}
+
+
+def admin_fetch_account_messages(conn, account, top=FETCH_LIMIT_DEFAULT, source="admin"):
     request_payload = account_row_to_payload(account, {"top": top})
     result = collect_messages(request_payload)
     messages = filter_messages_for_payload(result.get("messages") or [], request_payload)
     result["messages"] = messages
-    save_message_logs(conn, account["id"], messages, request_payload)
+    log_rows = save_message_logs(conn, account["id"], messages, request_payload)
     update_account_after_fetch(conn, account["id"], result=result)
+    result["webhooks"] = dispatch_code_webhooks(account, log_rows, source=source)
     return result
+
+
+def poll_enabled_accounts_once(top=None, source="auto-poll"):
+    top = max(1, min(int(top or get_auto_poll_top()), 30))
+    fetched = []
+    errors = []
+    with db_connect() as conn:
+        accounts = conn.execute("SELECT * FROM mail_accounts WHERE enabled = 1 ORDER BY created_at DESC").fetchall()
+        for account in accounts:
+            try:
+                result = admin_fetch_account_messages(conn, account, top=top, source=source)
+                conn.commit()
+                fetched.append({
+                    "accountId": account["id"],
+                    "email": account["email"],
+                    "count": len(result.get("messages") or []),
+                    "transport": result.get("transport") or "",
+                    "webhooks": result.get("webhooks") or {},
+                })
+            except Exception as exc:
+                update_account_after_fetch(conn, account["id"], error=exc)
+                conn.commit()
+                detail = compact_text(exc)
+                errors.append({"accountId": account["id"], "email": account["email"], "error": detail})
+                log_info(f"auto poll failed email={account['email']} detail={detail}")
+    return {"fetched": fetched, "errors": errors}
+
+
+def auto_poll_loop(stop_event):
+    interval = get_auto_poll_interval_seconds()
+    if interval <= 0:
+        log_info("automatic mail polling disabled")
+        return
+    log_info(f"automatic mail polling enabled interval={interval}s top={get_auto_poll_top()}")
+    if stop_event.wait(AUTO_POLL_START_DELAY_SECONDS):
+        return
+    while not stop_event.is_set():
+        started = time.monotonic()
+        try:
+            summary = poll_enabled_accounts_once(top=get_auto_poll_top(), source="auto-poll")
+            log_info(
+                f"auto poll complete accounts={len(summary['fetched'])} "
+                f"errors={len(summary['errors'])} elapsedMs={int((time.monotonic() - started) * 1000)}"
+            )
+        except Exception as exc:
+            log_info(f"auto poll loop failed detail={compact_text(exc)}")
+        if stop_event.wait(interval):
+            break
+
+
+def start_auto_poll_worker():
+    if get_auto_poll_interval_seconds() <= 0:
+        log_info("automatic mail polling disabled")
+        return None
+    stop_event = threading.Event()
+    worker = threading.Thread(target=auto_poll_loop, args=(stop_event,), name="mail-auto-poll", daemon=True)
+    worker.start()
+    return stop_event
 
 
 def parse_import_lines(text, provider, options=None):
@@ -1553,7 +1758,19 @@ class MailCodeHandler(BaseHTTPRequestHandler):
                 "version": VERSION,
                 "authRequired": bool(get_api_keys()),
                 "providers": ["hotmail", "custom-imap"],
+                "autoPollEnabled": get_auto_poll_interval_seconds() > 0,
+                "autoPollIntervalSeconds": get_auto_poll_interval_seconds(),
+                "webhookEnabled": bool(get_webhook_urls()),
                 "time": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+            })
+            return
+        if path == "/api/client-config":
+            json_response(self, 200, {
+                "ok": True,
+                "userCodePoll": get_user_code_poll_config(),
+                "adminRefreshIntervalSeconds": get_admin_refresh_interval_seconds(),
+                "autoPollEnabled": get_auto_poll_interval_seconds() > 0,
+                "autoPollIntervalSeconds": get_auto_poll_interval_seconds(),
             })
             return
         if path == "/api/admin/overview":
@@ -1859,15 +2076,16 @@ class MailCodeHandler(BaseHTTPRequestHandler):
                 result = collect_messages(request_payload)
                 result["messages"] = filter_messages_for_payload(result.get("messages") or [], request_payload)
                 update_account_after_fetch(conn, account["id"], result=result)
-                save_message_logs(conn, account["id"], result.get("messages") or [], request_payload)
-                increment_grant_usage(conn, grant["id"])
-                conn.commit()
+                log_rows = save_message_logs(conn, account["id"], result.get("messages") or [], request_payload)
             except Exception as exc:
                 update_account_after_fetch(conn, account["id"], error=exc)
                 conn.commit()
                 raise
 
             if path == "/api/user/messages":
+                increment_grant_usage(conn, grant["id"])
+                conn.commit()
+                dispatch_code_webhooks(account, log_rows, source="user")
                 json_response(self, 200, {
                     "ok": True,
                     "provider": result.get("provider") or "",
@@ -1878,6 +2096,10 @@ class MailCodeHandler(BaseHTTPRequestHandler):
                 return
 
             selected = select_latest_code(result["messages"], request_payload)
+            if selected["code"]:
+                increment_grant_usage(conn, grant["id"])
+            conn.commit()
+            dispatch_code_webhooks(account, log_rows, source="user")
             json_response(self, 200, {
                 "ok": True,
                 "provider": result.get("provider") or "",
@@ -1896,12 +2118,15 @@ def main(argv=None):
     if not get_admin_password():
         log_info("WARNING: MAIL_CODE_ADMIN_PASSWORD is not configured; admin login is disabled.")
     server = ThreadingHTTPServer((config["host"], config["port"]), MailCodeHandler)
+    poll_stop_event = start_auto_poll_worker()
     print(f"Mail code helper listening on http://{config['host']}:{config['port']}", flush=True)
     try:
         server.serve_forever()
     except KeyboardInterrupt:
         pass
     finally:
+        if poll_stop_event is not None:
+            poll_stop_event.set()
         server.server_close()
 
 

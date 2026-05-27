@@ -266,6 +266,13 @@ const $ = (id) => document.getElementById(id);
 const splitList = (value) => String(value || '').split(',').map((item) => item.trim()).filter(Boolean);
 let adminToken = localStorage.getItem('mailCodeAdminToken') || '';
 let state = { accounts: [], grants: [], messages: [] };
+let clientConfig = {
+  adminRefreshIntervalSeconds: 10,
+  autoPollEnabled: true,
+  autoPollIntervalSeconds: 60,
+};
+let realtimeTimer = null;
+let refreshing = false;
 
 function escapeHtml(value) {
   return String(value ?? '').replace(/[&<>"']/g, (char) => ({
@@ -324,14 +331,46 @@ async function api(path, body, method = 'POST') {
   return data;
 }
 
+async function loadClientConfig() {
+  try {
+    const response = await fetch('/api/client-config');
+    const data = await response.json();
+    if (data.ok) clientConfig = { ...clientConfig, ...data };
+  } catch {
+    // Keep defaults if the config endpoint is unavailable.
+  }
+}
+
 async function refresh() {
-  const data = await api('/api/admin/overview', null, 'GET');
-  state = {
-    accounts: data.accounts || [],
-    grants: data.grants || [],
-    messages: data.messages || [],
-  };
-  render();
+  if (refreshing) return;
+  refreshing = true;
+  try {
+    const data = await api('/api/admin/overview', null, 'GET');
+    state = {
+      accounts: data.accounts || [],
+      grants: data.grants || [],
+      messages: data.messages || [],
+    };
+    render();
+  } finally {
+    refreshing = false;
+  }
+}
+
+function realtimeRefreshAllowed() {
+  return Boolean(adminToken)
+    && document.visibilityState === 'visible'
+    && !$('accountDialog').open
+    && !$('grantDialog').open;
+}
+
+function startRealtimeRefresh() {
+  if (realtimeTimer) clearInterval(realtimeTimer);
+  const intervalMs = Math.max(3, Number(clientConfig.adminRefreshIntervalSeconds || 10)) * 1000;
+  realtimeTimer = setInterval(() => {
+    if (!realtimeRefreshAllowed()) return;
+    refresh().catch(() => {});
+  }, intervalMs);
 }
 
 function accountLabel(account) {
@@ -340,12 +379,18 @@ function accountLabel(account) {
 }
 
 function renderSelects() {
+  const selectedGrantAccount = $('grantAccount').value;
+  const selectedEditGrantAccount = $('editGrantAccount').value;
+  const selectedMessageAccount = $('messageAccount').value;
   const accountOptions = state.accounts.map((account) =>
     `<option value="${escapeHtml(account.id)}">${escapeHtml(accountLabel(account))} (${escapeHtml(account.provider)})</option>`
   ).join('');
   $('grantAccount').innerHTML = accountOptions;
   $('editGrantAccount').innerHTML = accountOptions;
   $('messageAccount').innerHTML = `<option value="">全部邮箱</option>${accountOptions}`;
+  if (selectedGrantAccount && state.accounts.some((account) => account.id === selectedGrantAccount)) $('grantAccount').value = selectedGrantAccount;
+  if (selectedEditGrantAccount && state.accounts.some((account) => account.id === selectedEditGrantAccount)) $('editGrantAccount').value = selectedEditGrantAccount;
+  if (selectedMessageAccount === '' || state.accounts.some((account) => account.id === selectedMessageAccount)) $('messageAccount').value = selectedMessageAccount;
 }
 
 function render() {
@@ -487,6 +532,7 @@ $('adminLoginBtn').addEventListener('click', async () => {
     adminToken = data.token;
     localStorage.setItem('mailCodeAdminToken', adminToken);
     await refresh();
+    startRealtimeRefresh();
   } catch (error) {
     setError('loginError', error.message);
   } finally {
@@ -662,12 +708,14 @@ document.addEventListener('click', async (event) => {
   }
 });
 
-if (adminToken) {
+loadClientConfig().then(() => {
+  if (!adminToken) return;
+  startRealtimeRefresh();
   refresh().catch(() => {
     adminToken = '';
     localStorage.removeItem('mailCodeAdminToken');
   });
-}
+});
 </script>
 </body>
 </html>

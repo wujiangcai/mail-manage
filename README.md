@@ -12,6 +12,8 @@ It provides:
 - User access-code login and mailbox-bound code fetching
 - Admin bulk mailbox import and access-code management
 - Admin unified mail-record view across all imported mailboxes
+- Automatic mailbox polling with stored mail records
+- Webhook push when a new verification code is detected
 - Hotmail / Outlook OAuth refresh-token fetching
 - Custom domain mailbox fetching over IMAP
 - Alias/catch-all mailbox fetching with recipient filtering
@@ -26,6 +28,8 @@ User page (`/`):
 
 - Login with an `mc_...` Access Code.
 - View the latest verification code in a large readable panel.
+- Wait for a verification code automatically. The page retries until a code is
+  found or the configured timeout is reached.
 - View recent mailbox messages as cards with sender, recipients, subject,
   mailbox, preview, time, and detected code. The user page no longer exposes raw
   JSON as the primary mail view.
@@ -35,6 +39,7 @@ Admin page (`/admin`):
 - Import Hotmail/Outlook OAuth or custom IMAP accounts in bulk.
 - Edit account label, mailbox folders, filters, and `targetEmail` alias matching.
 - Refresh one mailbox or all enabled mailboxes and review stored message records.
+- Realtime refreshes stored account, grant, and message state while the page is open.
 - Create, disable, edit, delete, reset read count, and regenerate Access Codes.
 
 ## Run Locally
@@ -73,6 +78,14 @@ Do not expose this service publicly without `MAIL_CODE_API_KEYS`.
 | `MAIL_CODE_DB_PATH` | `./data/mail-code-helper.sqlite3` | SQLite database path. |
 | `MAIL_CODE_API_KEYS` | empty | Comma-separated API keys for direct `/api/code` and `/api/messages` calls. |
 | `MAIL_CODE_ALLOWED_ORIGINS` | `*` | Comma-separated CORS origins |
+| `MAIL_CODE_AUTO_POLL_INTERVAL_SECONDS` | `60` | Background polling interval for enabled accounts. Set `0` to disable. |
+| `MAIL_CODE_AUTO_POLL_TOP` | `10` | Number of recent messages to read per mailbox during automatic polling. |
+| `MAIL_CODE_USER_CODE_POLL_INTERVAL_SECONDS` | `5` | User page retry interval while waiting for a code. |
+| `MAIL_CODE_USER_CODE_POLL_TIMEOUT_SECONDS` | `90` | User page max wait time for automatic code polling. |
+| `MAIL_CODE_ADMIN_REFRESH_INTERVAL_SECONDS` | `10` | Admin page realtime refresh interval. |
+| `MAIL_CODE_WEBHOOK_URLS` | empty | Comma-separated webhook URLs called when a newly seen message contains a code. |
+| `MAIL_CODE_WEBHOOK_SECRET` | empty | Optional HMAC secret for webhook signatures. |
+| `MAIL_CODE_WEBHOOK_TIMEOUT_SECONDS` | `8` | Per-webhook request timeout. |
 
 For backward compatibility, `MAIL_CODE_HELPER_API_KEY` and
 `HOTMAIL_HELPER_API_KEY` are also accepted.
@@ -94,6 +107,11 @@ immediately invalidates the old code.
 The admin panel can refresh one mailbox or all enabled mailboxes. Fetched message
 summaries are stored in SQLite so the admin can review received mail records
 across accounts without logging into each mailbox provider.
+
+The service also runs an automatic polling worker by default. It periodically
+reads enabled mailboxes, stores newly seen message summaries, and triggers
+webhooks for newly detected verification codes. Set
+`MAIL_CODE_AUTO_POLL_INTERVAL_SECONDS=0` when you only want manual refresh.
 
 ## Admin Bulk Import Formats
 
@@ -213,6 +231,40 @@ Admin-only endpoints:
 ```
 
 Omit `accountId` to refresh all enabled accounts.
+
+## Automatic Polling And Webhooks
+
+Automatic polling uses the same account configuration and alias filtering as
+manual admin refresh. It does not consume user Access Code read counts.
+
+When a newly stored message contains a detected verification code, each URL in
+`MAIL_CODE_WEBHOOK_URLS` receives a `POST` request:
+
+```json
+{
+  "event": "mail_code.detected",
+  "source": "auto-poll",
+  "account": {
+    "id": "acct_xxx",
+    "provider": "custom-imap",
+    "email": "catchall@example.com",
+    "targetEmail": "alias001@example.com"
+  },
+  "message": {
+    "id": "message-id",
+    "mailbox": "INBOX",
+    "sender": "noreply@example.com",
+    "recipients": ["alias001@example.com"],
+    "subject": "Your verification code",
+    "bodyPreview": "Your code is 123456",
+    "receivedDateTime": "2026-05-26T00:00:00Z",
+    "code": "123456"
+  }
+}
+```
+
+If `MAIL_CODE_WEBHOOK_SECRET` is set, requests include
+`X-Mail-Code-Signature: sha256=<hmac>` over the compact JSON body.
 
 ## Nginx Example
 

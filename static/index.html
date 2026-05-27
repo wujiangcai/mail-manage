@@ -139,6 +139,10 @@
 <script>
 const $ = (id) => document.getElementById(id);
 let token = localStorage.getItem('mailCodeUserToken') || '';
+let clientConfig = {
+  userCodePoll: { intervalSeconds: 5, timeoutSeconds: 90 },
+};
+let codePolling = false;
 
 function setBusy(busy) {
   $('loginBtn').disabled = busy;
@@ -210,6 +214,20 @@ async function api(path, body) {
   try { data = text ? JSON.parse(text) : {}; } catch { data = { raw: text }; }
   if (!response.ok || data.ok === false) throw new Error(data.error || text || `HTTP ${response.status}`);
   return data;
+}
+
+async function loadClientConfig() {
+  try {
+    const response = await fetch('/api/client-config');
+    const data = await response.json();
+    if (data.ok) clientConfig = { ...clientConfig, ...data };
+  } catch {
+    // Defaults are good enough if the config endpoint is unavailable.
+  }
+}
+
+function delay(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function renderCode(data) {
@@ -284,19 +302,44 @@ $('loginBtn').addEventListener('click', async () => {
   }
 });
 
-$('fetchCodeBtn').addEventListener('click', async () => {
+async function waitForCode() {
+  const intervalMs = Math.max(2, Number(clientConfig.userCodePoll?.intervalSeconds || 5)) * 1000;
+  const timeoutMs = Math.max(intervalMs, Number(clientConfig.userCodePoll?.timeoutSeconds || 90) * 1000);
+  const startedAt = Date.now();
+  let attempt = 0;
+
   showMessage('');
   setBusy(true);
-  $('statusText').textContent = '正在读取邮箱...';
+  codePolling = true;
+  $('fetchCodeBtn').textContent = '等待中...';
   try {
-    renderCode(await api('/api/user/code', {}));
-    api('/api/user/me').then(renderAccount).catch(() => {});
+    while (Date.now() - startedAt <= timeoutMs) {
+      attempt += 1;
+      $('statusText').textContent = `正在等待验证码，第 ${attempt} 次检查...`;
+      const data = await api('/api/user/code', {});
+      renderCode(data);
+      if (data.code) {
+        api('/api/user/me').then(renderAccount).catch(() => {});
+        return;
+      }
+      const remaining = Math.max(0, Math.ceil((timeoutMs - (Date.now() - startedAt)) / 1000));
+      $('statusText').textContent = `暂未找到验证码，${Math.round(intervalMs / 1000)} 秒后重试，剩余 ${remaining} 秒`;
+      await delay(intervalMs);
+    }
+    $('statusText').textContent = '等待超时，暂未找到验证码';
   } catch (error) {
     showMessage(error.message);
     $('statusText').textContent = '取码失败';
   } finally {
+    codePolling = false;
+    $('fetchCodeBtn').textContent = '获取验证码';
     setBusy(false);
   }
+}
+
+$('fetchCodeBtn').addEventListener('click', async () => {
+  if (codePolling) return;
+  await waitForCode();
 });
 
 $('fetchMessagesBtn').addEventListener('click', async () => {
@@ -324,6 +367,7 @@ if (token) {
     localStorage.removeItem('mailCodeUserToken');
   });
 }
+loadClientConfig();
 </script>
 </body>
 </html>
