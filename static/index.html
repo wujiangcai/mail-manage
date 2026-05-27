@@ -110,7 +110,7 @@
       <h2>最新验证码</h2>
       <div class="code-box">
         <div>
-          <div id="code" class="code">------</div>
+          <div id="code" class="code">等待获取</div>
           <div id="statusText" class="muted">等待登录</div>
         </div>
       </div>
@@ -154,6 +154,23 @@ function showMessage(message) {
   $('loginError').textContent = message || '';
 }
 
+function setStatus(message) {
+  $('statusText').textContent = message || '';
+}
+
+function cleanPreview(value) {
+  return String(value || '')
+    .replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi, ' ')
+    .replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, ' ')
+    .replace(/<!--[\s\S]*?-->/g, ' ')
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/@font-face\s*\{[\s\S]*?\}/gi, ' ')
+    .replace(/(?:\.[\w-]+|#[\w-]+|[a-z][\w-]*)\s*\{[^{}]{0,1200}\}/gi, ' ')
+    .replace(/(?:font-family|font-style|font-weight|font-display|line-height|padding|width|color|background|margin|border)\s*:\s*[^;{}]{0,240};?/gi, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
 function escapeHtml(value) {
   return String(value ?? '').replace(/[&<>"']/g, (char) => ({
     '&': '&amp;',
@@ -181,7 +198,8 @@ function getRecipients(message) {
 }
 
 function findCode(message) {
-  const text = [message?.subject, message?.bodyPreview, message?.body?.content].join('\n');
+  const body = message?.body && typeof message.body === 'object' ? message.body.content : '';
+  const text = [message?.subject, cleanPreview(message?.bodyPreview), cleanPreview(body)].join('\n');
   const match = String(text || '').match(/\b\d{4,8}\b/);
   return match ? match[0] : '';
 }
@@ -197,7 +215,7 @@ function renderAccount(data) {
   $('fetchCodeBtn').disabled = false;
   $('fetchMessagesBtn').disabled = false;
   $('logoutBtn').classList.remove('hidden');
-  $('statusText').textContent = '已登录';
+  setStatus('登录成功，可以获取验证码了');
 }
 
 async function api(path, body) {
@@ -231,19 +249,20 @@ function delay(ms) {
 }
 
 function renderCode(data) {
-  $('code').textContent = data.code || '未找到';
-  $('statusText').textContent = data.code ? `通过 ${data.transport || data.provider || 'mail'} 获取` : '没有匹配到验证码';
+  $('code').textContent = data.code || '等待获取';
+  setStatus(data.code ? `已获取最新验证码，来源：${data.transport || data.provider || 'mail'}` : '没有匹配到验证码，可稍后重试');
   renderMessageDetail(data.message || {});
 }
 
 function renderMessageDetail(message) {
-  const hasMessage = Boolean(message.subject || message.bodyPreview || getSender(message));
+  const preview = cleanPreview(message.bodyPreview || '');
+  const hasMessage = Boolean(message.subject || preview || getSender(message));
   $('messageTable').classList.toggle('hidden', !hasMessage);
   $('msgSender').textContent = getSender(message);
   $('msgRecipients').textContent = getRecipients(message);
   $('msgSubject').textContent = message.subject || '';
   $('msgTime').textContent = fmtTime(message.receivedDateTime || message.receivedTimestamp);
-  $('msgPreview').textContent = message.bodyPreview || '';
+  $('msgPreview').textContent = preview;
 }
 
 function renderMessages(data) {
@@ -261,6 +280,7 @@ function renderMessages(data) {
   $('mailList').innerHTML = messages.map((message, index) => {
     const code = findCode(message);
     const recipients = getRecipients(message);
+    const preview = cleanPreview(message.bodyPreview || '');
     return `
       <button class="mail-item" type="button" data-message-index="${index}">
         <div class="mail-head">
@@ -270,7 +290,7 @@ function renderMessages(data) {
           </div>
           <div class="time">${escapeHtml(fmtTime(message.receivedDateTime || message.receivedTimestamp))}</div>
         </div>
-        <div class="preview">${escapeHtml(message.bodyPreview || '')}</div>
+        <div class="preview">${escapeHtml(preview || '无预览内容')}</div>
         <div class="tags">
           ${message.mailbox ? `<span class="tag">${escapeHtml(message.mailbox)}</span>` : ''}
           ${code ? `<span class="tag code-tag">${escapeHtml(code)}</span>` : ''}
@@ -288,15 +308,18 @@ function renderMessages(data) {
 }
 
 $('loginBtn').addEventListener('click', async () => {
-  showMessage('');
+  showMessage('正在登录，请稍候...');
+  setStatus('正在验证 Access Code...');
   setBusy(true);
   try {
     const data = await api('/api/user/login', { accessCode: $('accessCode').value.trim() });
     token = data.token;
     localStorage.setItem('mailCodeUserToken', token);
     renderAccount(data);
+    showMessage('');
   } catch (error) {
     showMessage(error.message);
+    setStatus('登录失败，请检查 Access Code');
   } finally {
     setBusy(false);
   }
@@ -311,25 +334,27 @@ async function waitForCode() {
   showMessage('');
   setBusy(true);
   codePolling = true;
+  setStatus('正在连接邮箱并查找最新验证码...');
   $('fetchCodeBtn').textContent = '等待中...';
   try {
     while (Date.now() - startedAt <= timeoutMs) {
       attempt += 1;
-      $('statusText').textContent = `正在等待验证码，第 ${attempt} 次检查...`;
+      setStatus(`正在查找最新验证码，第 ${attempt} 次检查...`);
       const data = await api('/api/user/code', {});
       renderCode(data);
       if (data.code) {
         api('/api/user/me').then(renderAccount).catch(() => {});
+        setStatus(`已获取最新验证码，来源：${data.transport || data.provider || 'mail'}`);
         return;
       }
       const remaining = Math.max(0, Math.ceil((timeoutMs - (Date.now() - startedAt)) / 1000));
-      $('statusText').textContent = `暂未找到验证码，${Math.round(intervalMs / 1000)} 秒后重试，剩余 ${remaining} 秒`;
+      setStatus(`暂未找到验证码，${Math.round(intervalMs / 1000)} 秒后自动重试，剩余 ${remaining} 秒`);
       await delay(intervalMs);
     }
-    $('statusText').textContent = '等待超时，暂未找到验证码';
+    setStatus('等待超时，暂未找到验证码');
   } catch (error) {
     showMessage(error.message);
-    $('statusText').textContent = '取码失败';
+    setStatus('取码失败，请稍后重试');
   } finally {
     codePolling = false;
     $('fetchCodeBtn').textContent = '获取验证码';
@@ -343,13 +368,17 @@ $('fetchCodeBtn').addEventListener('click', async () => {
 });
 
 $('fetchMessagesBtn').addEventListener('click', async () => {
-  showMessage('');
+  showMessage('正在读取最近邮件，请稍候...');
+  setStatus('正在读取邮箱邮件...');
   setBusy(true);
   try {
     renderMessages(await api('/api/user/messages', {}));
+    showMessage('');
+    setStatus('邮件读取完成，可点击邮件查看详情');
     api('/api/user/me').then(renderAccount).catch(() => {});
   } catch (error) {
     showMessage(error.message);
+    setStatus('读取邮件失败，请稍后重试');
   } finally {
     setBusy(false);
   }

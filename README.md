@@ -27,18 +27,24 @@ fetch codes with a purchase/access code instead of seeing mailbox secrets.
 User page (`/`):
 
 - Login with an `mc_...` Access Code.
-- View the latest verification code in a large readable panel.
-- Wait for a verification code automatically. The page retries until a code is
-  found or the configured timeout is reached.
+- View the latest verification code directly in a large readable panel.
+- Wait for a verification code automatically with clear login, fetching, retry,
+  timeout, and failure status messages.
 - View recent mailbox messages as cards with sender, recipients, subject,
-  mailbox, preview, time, and detected code. The user page no longer exposes raw
-  JSON as the primary mail view.
+  mailbox, preview, time, and detected code. HTML/CSS-heavy email templates are
+  cleaned into readable plain-text previews.
+- The user page no longer exposes raw JSON as the primary mail view.
 
 Admin page (`/admin`):
 
 - Import Hotmail/Outlook OAuth or custom IMAP accounts in bulk.
 - Edit account label, mailbox folders, filters, and `targetEmail` alias matching.
 - Refresh one mailbox or all enabled mailboxes and review stored message records.
+- Filter mail records by mailbox; selecting one mailbox shows all stored records
+  for that account, while the default view shows the latest records across all
+  accounts.
+- Review mail records in a compact table with cleaned plain-text previews so
+  HTML templates and CSS do not dominate the page.
 - Realtime refreshes stored account, grant, and message state while the page is open.
 - Create, disable, edit, delete, reset read count, and regenerate Access Codes.
 
@@ -106,7 +112,9 @@ immediately invalidates the old code.
 
 The admin panel can refresh one mailbox or all enabled mailboxes. Fetched message
 summaries are stored in SQLite so the admin can review received mail records
-across accounts without logging into each mailbox provider.
+across accounts without logging into each mailbox provider. Stored previews are
+cleaned into plain text to avoid showing raw HTML templates, embedded CSS, or
+font declarations in either the user page or admin records table.
 
 The service also runs an automatic polling worker by default. It periodically
 reads enabled mailboxes, stores newly seen message summaries, and triggers

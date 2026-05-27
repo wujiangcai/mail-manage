@@ -40,6 +40,7 @@
     .toolbar { display: flex; align-items: end; gap: 10px; flex-wrap: wrap; margin-bottom: 12px; }
     .toolbar label { min-width: 180px; margin: 0; }
     .toolbar button { width: auto; min-width: 108px; }
+    .toolbar-info { align-self: center; min-width: 180px; }
     .stats { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; margin-bottom: 16px; }
     .stat { background: #fff; border: 1px solid #dbe3ee; border-radius: 8px; padding: 13px; }
     .stat b { display: block; font-size: 24px; margin-top: 2px; }
@@ -47,6 +48,16 @@
     th, td { border-bottom: 1px solid #e2e8f0; padding: 10px 8px; text-align: left; vertical-align: top; }
     th { color: #64748b; font-weight: 700; background: #f8fafc; }
     tbody tr:hover { background: #fbfdff; }
+    .messages-table { table-layout: fixed; min-width: 980px; }
+    .messages-table th:nth-child(1) { width: 120px; }
+    .messages-table th:nth-child(2) { width: 210px; }
+    .messages-table th:nth-child(3) { width: 185px; }
+    .messages-table th:nth-child(4) { width: 220px; }
+    .messages-table th:nth-child(6) { width: 92px; }
+    .mail-subject { font-weight: 700; color: #0f172a; margin-bottom: 4px; }
+    .mail-preview { color: #64748b; font-size: 12px; line-height: 1.45; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; word-break: break-word; }
+    .mail-meta { display: grid; gap: 3px; min-width: 0; }
+    .mail-code-cell { text-align: center; vertical-align: middle; }
     .mono { font-family: Consolas, "Courier New", monospace; word-break: break-all; }
     .pill { display: inline-flex; align-items: center; min-height: 22px; border-radius: 999px; padding: 2px 8px; background: #eef2ff; color: #3730a3; font-size: 12px; }
     .pill.ok { background: #ecfdf3; color: #047857; }
@@ -163,11 +174,12 @@
             </label>
             <button id="fetchSelectedBtn" type="button">刷新所选</button>
             <button id="fetchAllBtn" type="button" class="secondary">刷新全部</button>
+            <div id="messageFilterInfo" class="muted toolbar-info">当前显示最近邮件</div>
           </div>
           <div id="messageError" class="toast"></div>
           <h2>邮件记录</h2>
           <div class="table-wrap">
-            <table>
+            <table class="messages-table">
               <thead>
                 <tr><th>时间</th><th>邮箱</th><th>发件人</th><th>收件人</th><th>标题</th><th>验证码</th></tr>
               </thead>
@@ -265,7 +277,7 @@
 const $ = (id) => document.getElementById(id);
 const splitList = (value) => String(value || '').split(',').map((item) => item.trim()).filter(Boolean);
 let adminToken = localStorage.getItem('mailCodeAdminToken') || '';
-let state = { accounts: [], grants: [], messages: [] };
+let state = { accounts: [], grants: [], messages: [], messageAccountId: '' };
 let clientConfig = {
   adminRefreshIntervalSeconds: 10,
   autoPollEnabled: true,
@@ -273,6 +285,19 @@ let clientConfig = {
 };
 let realtimeTimer = null;
 let refreshing = false;
+
+function cleanPreview(value) {
+  return String(value || '')
+    .replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi, ' ')
+    .replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, ' ')
+    .replace(/<!--[\s\S]*?-->/g, ' ')
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/@font-face\s*\{[\s\S]*?\}/gi, ' ')
+    .replace(/(?:\.[\w-]+|#[\w-]+|[a-z][\w-]*)\s*\{[^{}]{0,1200}\}/gi, ' ')
+    .replace(/(?:font-family|font-style|font-weight|font-display|line-height|padding|width|color|background|margin|border)\s*:\s*[^;{}]{0,240};?/gi, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
 
 function escapeHtml(value) {
   return String(value ?? '').replace(/[&<>"']/g, (char) => ({
@@ -345,11 +370,20 @@ async function refresh() {
   if (refreshing) return;
   refreshing = true;
   try {
+    const accountId = state.messageAccountId || $('messageAccount').value || '';
     const data = await api('/api/admin/overview', null, 'GET');
+    const accounts = data.accounts || [];
+    const messageAccountId = accountId && accounts.some((account) => account.id === accountId) ? accountId : '';
+    let messages = data.messages || [];
+    if (messageAccountId) {
+      const messageData = await api(`/api/admin/messages?accountId=${encodeURIComponent(messageAccountId)}&limit=0`, null, 'GET');
+      messages = messageData.messages || [];
+    }
     state = {
-      accounts: data.accounts || [],
+      accounts,
       grants: data.grants || [],
-      messages: data.messages || [],
+      messages,
+      messageAccountId,
     };
     render();
   } finally {
@@ -381,7 +415,7 @@ function accountLabel(account) {
 function renderSelects() {
   const selectedGrantAccount = $('grantAccount').value;
   const selectedEditGrantAccount = $('editGrantAccount').value;
-  const selectedMessageAccount = $('messageAccount').value;
+  const selectedMessageAccount = state.messageAccountId;
   const accountOptions = state.accounts.map((account) =>
     `<option value="${escapeHtml(account.id)}">${escapeHtml(accountLabel(account))} (${escapeHtml(account.provider)})</option>`
   ).join('');
@@ -407,6 +441,10 @@ function render() {
 }
 
 function renderMessages() {
+  const selectedAccount = state.accounts.find((account) => account.id === state.messageAccountId);
+  $('messageFilterInfo').textContent = selectedAccount
+    ? `当前显示 ${accountLabel(selectedAccount)} 的全部邮件（${state.messages.length} 封）`
+    : `当前显示最近 ${state.messages.length} 封邮件`;
   if (!state.messages.length) {
     $('messagesBody').innerHTML = '<tr><td colspan="6"><div class="empty">暂无邮件记录</div></td></tr>';
     return;
@@ -414,14 +452,19 @@ function renderMessages() {
   $('messagesBody').innerHTML = state.messages.map((message) => {
     const account = message.account || {};
     const accountName = account.targetEmail || account.email || message.accountId;
+    const preview = cleanPreview(message.bodyPreview || '');
+    const recipients = (message.recipients || []).join(', ') || '-';
     return `
       <tr>
         <td>${escapeHtml(fmtTime(message.receivedTimestamp || message.receivedDateTime || message.fetchedAt))}</td>
-        <td><div class="mono">${escapeHtml(accountName)}</div><div class="muted">${escapeHtml(message.mailbox || '')}</div></td>
+        <td><div class="mail-meta"><div class="mono">${escapeHtml(accountName)}</div><div class="muted">${escapeHtml(message.mailbox || '')}</div></div></td>
         <td class="mono">${escapeHtml(message.sender || '-')}</td>
-        <td class="mono">${escapeHtml((message.recipients || []).join(', ') || '-')}</td>
-        <td><strong>${escapeHtml(message.subject || '(无标题)')}</strong><div class="muted">${escapeHtml(message.bodyPreview || '')}</div></td>
-        <td>${message.code ? `<span class="pill ok">${escapeHtml(message.code)}</span>` : '-'}</td>
+        <td class="mono">${escapeHtml(recipients)}</td>
+        <td>
+          <div class="mail-subject">${escapeHtml(message.subject || '(无标题)')}</div>
+          <div class="mail-preview">${escapeHtml(preview || '无预览内容')}</div>
+        </td>
+        <td class="mail-code-cell">${message.code ? `<span class="pill ok">${escapeHtml(message.code)}</span>` : '-'}</td>
       </tr>
     `;
   }).join('');
@@ -512,6 +555,7 @@ function openGrantDialog(grant) {
 
 async function fetchMessages(accountId = '') {
   setError('messageError', '');
+  state.messageAccountId = accountId;
   const data = await api('/api/admin/messages/fetch', {
     accountId,
     top: Number($('fetchTop').value || 10),
@@ -522,6 +566,18 @@ async function fetchMessages(accountId = '') {
   if (data.errors?.length) {
     setError('messageError', data.errors.map((item) => `${item.email}: ${item.error}`).join('\n'));
   }
+}
+
+async function loadStoredMessages(accountId = '') {
+  setError('messageError', '');
+  state.messageAccountId = accountId;
+  const query = new URLSearchParams({
+    limit: accountId ? '0' : '100',
+  });
+  if (accountId) query.set('accountId', accountId);
+  const data = await api(`/api/admin/messages?${query.toString()}`, null, 'GET');
+  state.messages = data.messages || [];
+  render();
 }
 
 $('adminLoginBtn').addEventListener('click', async () => {
@@ -594,6 +650,14 @@ $('fetchAllBtn').addEventListener('click', async () => {
   finally { setBusy($('fetchAllBtn'), false); }
 });
 
+$('messageAccount').addEventListener('change', async () => {
+  try {
+    await loadStoredMessages($('messageAccount').value);
+  } catch (error) {
+    setError('messageError', error.message);
+  }
+});
+
 $('saveAccountBtn').addEventListener('click', async () => {
   setBusy($('saveAccountBtn'), true);
   try {
@@ -609,9 +673,14 @@ $('saveAccountBtn').addEventListener('click', async () => {
       },
     });
     state.accounts = data.accounts || state.accounts;
-    state.messages = data.messages || state.messages;
     $('accountDialog').close();
-    render();
+    if (state.messageAccountId && state.accounts.some((account) => account.id === state.messageAccountId)) {
+      await loadStoredMessages(state.messageAccountId);
+    } else {
+      state.messageAccountId = '';
+      state.messages = data.messages || state.messages;
+      render();
+    }
   } catch (error) {
     showDialogError(error.message);
   } finally {
@@ -667,13 +736,19 @@ document.addEventListener('click', async (event) => {
       const account = state.accounts.find((item) => item.id === accountToggle);
       const data = await api('/api/admin/accounts/patch', { accountId: accountToggle, updates: { enabled: !account.enabled } });
       state.accounts = data.accounts || state.accounts;
-      state.messages = data.messages || state.messages;
-      render();
+      if (state.messageAccountId && state.accounts.some((item) => item.id === state.messageAccountId)) {
+        await loadStoredMessages(state.messageAccountId);
+      } else {
+        state.messageAccountId = '';
+        state.messages = data.messages || state.messages;
+        render();
+      }
     }
     if (accountDelete && confirm('确认删除这个邮箱账号及其全部 Access Code？')) {
       const data = await api('/api/admin/accounts/delete', { accountId: accountDelete });
       state.accounts = data.accounts || [];
       state.grants = data.grants || [];
+      if (state.messageAccountId === accountDelete) state.messageAccountId = '';
       state.messages = data.messages || [];
       render();
     }

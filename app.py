@@ -205,24 +205,26 @@ def require_api_key(handler):
         raise PermissionError("Unauthorized: missing or invalid API key")
 
 
-def json_response(handler, status, payload):
+def json_response(handler, status, payload, include_body=True):
     body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
     handler.send_response(status)
     handler.send_header("Content-Type", "application/json; charset=utf-8")
     handler.send_header("Content-Length", str(len(body)))
     send_cors_headers(handler)
     handler.end_headers()
-    handler.wfile.write(body)
+    if include_body:
+        handler.wfile.write(body)
 
 
-def text_response(handler, status, content_type, body):
+def text_response(handler, status, content_type, body, include_body=True):
     encoded = str(body or "").encode("utf-8")
     handler.send_response(status)
     handler.send_header("Content-Type", content_type)
     handler.send_header("Content-Length", str(len(encoded)))
     send_cors_headers(handler)
     handler.end_headers()
-    handler.wfile.write(encoded)
+    if include_body:
+        handler.wfile.write(encoded)
 
 
 def read_json_payload(handler):
@@ -533,6 +535,27 @@ def normalize_message_recipients(message):
     }
 
 
+def clean_message_preview(value):
+    text = str(value or "")
+    if not text:
+        return ""
+    text = html.unescape(text)
+    text = re.sub(r"(?is)<(style|script)\b[^>]*>.*?</\1>", " ", text)
+    text = re.sub(r"(?is)<!--.*?-->", " ", text)
+    text = re.sub(r"(?is)<[^>]+>", " ", text)
+    text = re.sub(r"(?is)@font-face\s*\{.*?\}", " ", text)
+    text = re.sub(r"(?is)(?:\.[\w-]+|#[\w-]+|[a-z][\w-]*)\s*\{[^{}]{0,1200}\}", " ", text)
+    text = re.sub(r"(?is)(?:font-family|font-style|font-weight|font-display|line-height|padding|width|color|background|margin|border)\s*:\s*[^;{}]{0,240};?", " ", text)
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def best_message_preview(preview, body="", limit=500):
+    cleaned_preview = clean_message_preview(preview)
+    if cleaned_preview and not re.search(r"@font-face|font-family|text-size-adjust|ExternalClass|ReadMsgBody", cleaned_preview, re.IGNORECASE):
+        return cleaned_preview[:limit]
+    return (clean_message_preview(body) or cleaned_preview)[:limit]
+
+
 def extract_text_part(message):
     if message.is_multipart():
         for part in message.walk():
@@ -544,17 +567,17 @@ def extract_text_part(message):
             charset = part.get_content_charset() or "utf-8"
             text = payload.decode(charset, errors="ignore").strip()
             if part.get_content_type() == "text/plain" and text:
-                return text
+                return clean_message_preview(text)
             if part.get_content_type() == "text/html" and text:
-                return re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", html.unescape(text))).strip()
+                return clean_message_preview(text)
         return ""
 
     payload = message.get_payload(decode=True) or b""
     charset = message.get_content_charset() or "utf-8"
     text = payload.decode(charset, errors="ignore").strip()
     if message.get_content_type() == "text/html":
-        return re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", html.unescape(text))).strip()
-    return text
+        return clean_message_preview(text)
+    return clean_message_preview(text)
 
 
 def mailbox_candidates(mailbox):
@@ -625,7 +648,7 @@ def normalize_imap_message(message_id, raw_bytes, mailbox):
                 "name": sender_name.strip(),
             }
         },
-        "bodyPreview": body[:500],
+        "bodyPreview": best_message_preview(body, body),
         "body": {"content": body},
         "recipients": normalize_message_recipients(parsed),
         "receivedDateTime": to_iso_string(timestamp_ms),
@@ -900,7 +923,7 @@ def normalize_graph_message(message, mailbox):
                 "name": str(email_addr.get("name") or "").strip(),
             }
         },
-        "bodyPreview": str(message.get("bodyPreview") or "").strip(),
+        "bodyPreview": best_message_preview(message.get("bodyPreview"), body_content),
         "body": {"content": body_content},
         "recipients": normalize_api_recipients(
             message.get("toRecipients"),
@@ -930,7 +953,7 @@ def normalize_outlook_message(message, mailbox):
                 "name": str(email_addr.get("Name") or email_addr.get("name") or "").strip(),
             }
         },
-        "bodyPreview": str(message.get("BodyPreview") or message.get("bodyPreview") or "").strip(),
+        "bodyPreview": best_message_preview(message.get("BodyPreview") or message.get("bodyPreview"), body_content),
         "body": {"content": body_content},
         "recipients": normalize_api_recipients(
             message.get("ToRecipients") or message.get("toRecipients"),
@@ -1171,7 +1194,7 @@ def save_message_logs(conn, account_id, messages, filters=None):
             "sender": message_sender(message),
             "recipients": json_dumps(message_recipients(message)),
             "subject": str(message.get("subject") or "")[:500],
-            "body_preview": str(message.get("bodyPreview") or "")[:1200],
+            "body_preview": best_message_preview(message.get("bodyPreview"), message.get("body", {}).get("content", "") if isinstance(message.get("body"), dict) else "", limit=1200),
             "received_at": str(message.get("receivedDateTime") or ""),
             "received_timestamp": int(message.get("receivedTimestamp") or 0),
             "code": code[:64],
@@ -1434,7 +1457,7 @@ def safe_message_log(row):
         "sender": row["sender"],
         "recipients": json_loads(row["recipients"], []),
         "subject": row["subject"],
-        "bodyPreview": row["body_preview"],
+        "bodyPreview": best_message_preview(row["body_preview"], limit=1200),
         "receivedDateTime": row["received_at"],
         "receivedTimestamp": row["received_timestamp"],
         "code": row["code"],
@@ -1444,12 +1467,17 @@ def safe_message_log(row):
 
 
 def list_message_logs(conn, account_id="", limit=100):
-    limit = max(1, min(int(limit or 100), 500))
+    limit = int(limit or 0)
     params = []
     where = ""
     if account_id:
         where = "WHERE m.account_id = ?"
         params.append(account_id)
+    limit_clause = ""
+    if limit > 0:
+        limit = min(limit, 5000)
+        limit_clause = "LIMIT ?"
+        params.append(limit)
     rows = conn.execute(
         f"""
         SELECT
@@ -1463,9 +1491,9 @@ def list_message_logs(conn, account_id="", limit=100):
         JOIN mail_accounts a ON a.id = m.account_id
         {where}
         ORDER BY COALESCE(NULLIF(m.received_timestamp, 0), m.fetched_at) DESC, m.fetched_at DESC
-        LIMIT ?
+        {limit_clause}
         """,
-        [*params, limit],
+        params,
     ).fetchall()
     return [safe_message_log(row) for row in rows]
 
@@ -1487,7 +1515,7 @@ def webhook_message_payload(row):
         "sender": row["sender"],
         "recipients": json_loads(row["recipients"], []),
         "subject": row["subject"],
-        "bodyPreview": row["body_preview"],
+        "bodyPreview": best_message_preview(row["body_preview"], limit=1200),
         "receivedDateTime": row["received_at"],
         "receivedTimestamp": row["received_timestamp"],
         "code": row["code"],
@@ -1730,6 +1758,27 @@ def static_file(name):
 
 
 class MailCodeHandler(BaseHTTPRequestHandler):
+    def do_HEAD(self):
+        path = urlparse(self.path).path
+        if path in {"", "/", "/user", "/user/", "/code", "/messages"}:
+            target = static_file("index.html")
+            if target.exists():
+                text_response(self, 200, "text/html; charset=utf-8", target.read_text(encoding="utf-8"), include_body=False)
+                return
+            text_response(self, 200, "text/plain; charset=utf-8", "mail-code-helper", include_body=False)
+            return
+        if path in {"/admin", "/admin/"}:
+            target = static_file("admin.html")
+            if target.exists():
+                text_response(self, 200, "text/html; charset=utf-8", target.read_text(encoding="utf-8"), include_body=False)
+                return
+            json_response(self, 404, {"ok": False, "error": "admin.html not found"}, include_body=False)
+            return
+        if path in {"/health", "/api/client-config"}:
+            json_response(self, 200, {"ok": True}, include_body=False)
+            return
+        json_response(self, 404, {"ok": False, "error": f"Unsupported path: {self.path}"}, include_body=False)
+
     def do_OPTIONS(self):
         self.send_response(204)
         send_cors_headers(self)
@@ -1737,14 +1786,14 @@ class MailCodeHandler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         path = urlparse(self.path).path
-        if path in {"", "/"}:
+        if path in {"", "/", "/user", "/user/", "/code", "/messages"}:
             target = static_file("index.html")
             if target.exists():
                 text_response(self, 200, "text/html; charset=utf-8", target.read_text(encoding="utf-8"))
                 return
             text_response(self, 200, "text/plain; charset=utf-8", "mail-code-helper")
             return
-        if path == "/admin":
+        if path in {"/admin", "/admin/"}:
             target = static_file("admin.html")
             if target.exists():
                 text_response(self, 200, "text/html; charset=utf-8", target.read_text(encoding="utf-8"))
@@ -1793,7 +1842,10 @@ class MailCodeHandler(BaseHTTPRequestHandler):
                 require_admin_session(self)
                 query = parse_qs(urlparse(self.path).query)
                 account_id = str((query.get("accountId") or [""])[0] or "").strip()
-                limit = int((query.get("limit") or ["100"])[0] or 100)
+                try:
+                    limit = int((query.get("limit") or ["100"])[0] or 100)
+                except ValueError as exc:
+                    raise ValueError("Invalid limit") from exc
                 with db_connect() as conn:
                     json_response(self, 200, {
                         "ok": True,
@@ -1801,6 +1853,8 @@ class MailCodeHandler(BaseHTTPRequestHandler):
                     })
             except PermissionError as exc:
                 json_response(self, 401, {"ok": False, "error": str(exc)})
+            except ValueError as exc:
+                json_response(self, 400, {"ok": False, "error": str(exc)})
             except Exception as exc:
                 json_response(self, 500, {"ok": False, "error": str(exc)})
             return
@@ -1978,7 +2032,7 @@ class MailCodeHandler(BaseHTTPRequestHandler):
                     "fetched": fetched,
                     "errors": errors,
                     "accounts": list_accounts(conn),
-                    "messages": list_message_logs(conn, limit=100),
+                    "messages": list_message_logs(conn, account_id=account_id, limit=0 if account_id else 100),
                 })
                 return
 
