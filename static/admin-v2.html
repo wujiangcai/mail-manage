@@ -1,0 +1,969 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>邮箱取码管理后台</title>
+  <style>
+    :root {
+      color-scheme: light;
+      font-family: Inter, "Segoe UI", Arial, "Microsoft YaHei", sans-serif;
+      --bg: #f3f5f8;
+      --surface: #ffffff;
+      --surface-soft: #f8fafc;
+      --text: #111827;
+      --muted: #64748b;
+      --line: #d9e2ec;
+      --line-soft: #e7edf3;
+      --primary: #176b87;
+      --primary-strong: #0f5067;
+      --primary-soft: #e6f5f8;
+      --success: #047857;
+      --success-soft: #e8f8ef;
+      --danger: #b42318;
+      --danger-soft: #fff0ed;
+      --warning: #b45309;
+      --warning-soft: #fff7e6;
+      --shadow: 0 10px 24px rgba(15, 23, 42, .07);
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; min-height: 100vh; background: var(--bg); color: var(--text); }
+    main { width: min(1480px, calc(100vw - 32px)); margin: 0 auto; padding: 22px 0 48px; }
+    h1, h2, h3, p { margin: 0; }
+    h1 { font-size: 24px; line-height: 1.25; }
+    h2 { font-size: 17px; line-height: 1.35; }
+    .muted { color: var(--muted); font-size: 13px; line-height: 1.5; }
+    .topbar { display: flex; align-items: center; justify-content: space-between; gap: 14px; margin-bottom: 16px; }
+    .brand { display: flex; align-items: center; gap: 12px; min-width: 0; }
+    .logo { width: 44px; height: 44px; border-radius: 8px; display: grid; place-items: center; background: #14213d; color: #fff; font-weight: 900; }
+    .top-actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; justify-content: flex-end; }
+    .top-link, .status-chip { display: inline-flex; align-items: center; min-height: 34px; border-radius: 8px; padding: 0 11px; border: 1px solid rgba(23,107,135,.18); background: #fff; color: #255066; font-size: 13px; font-weight: 800; text-decoration: none; }
+    .login-wrap { min-height: calc(100vh - 150px); display: grid; place-items: center; }
+    .login-card { width: min(460px, 100%); background: #fff; border: 1px solid var(--line); border-radius: 8px; padding: 24px; box-shadow: var(--shadow); }
+    .dashboard-head { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 16px; align-items: end; margin-bottom: 14px; }
+    .stats { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; margin-bottom: 14px; }
+    .stat { min-height: 86px; border: 1px solid var(--line); border-radius: 8px; padding: 14px; background: #fff; box-shadow: var(--shadow); }
+    .stat span { display: block; color: var(--muted); font-size: 13px; font-weight: 800; }
+    .stat b { display: block; margin-top: 8px; font-size: 28px; line-height: 1; }
+    .grid { display: grid; grid-template-columns: 396px minmax(0, 1fr); gap: 16px; align-items: start; }
+    .stack { display: grid; gap: 16px; }
+    .panel { background: #fff; border: 1px solid var(--line); border-radius: 8px; box-shadow: var(--shadow); overflow: hidden; }
+    .panel-head { display: flex; justify-content: space-between; gap: 12px; padding: 15px 16px 0; }
+    .panel-title { display: grid; gap: 4px; }
+    .panel-badge { height: 26px; display: inline-flex; align-items: center; border: 1px solid var(--line-soft); border-radius: 999px; padding: 0 9px; background: var(--surface-soft); color: #41566d; font-size: 12px; font-weight: 900; white-space: nowrap; }
+    .panel-body { padding: 16px; }
+    label { display: grid; gap: 7px; color: #344256; font-size: 13px; font-weight: 800; margin-top: 12px; }
+    label:first-child { margin-top: 0; }
+    input, textarea, select, button { width: 100%; border: 1px solid #c9d5e1; border-radius: 7px; padding: 10px 11px; font: inherit; background: #fff; color: #0f172a; }
+    input:focus, textarea:focus, select:focus { outline: 0; border-color: var(--primary); box-shadow: 0 0 0 3px rgba(23,107,135,.14); }
+    textarea { min-height: 138px; resize: vertical; font-family: Consolas, "Courier New", monospace; line-height: 1.45; }
+    button { min-height: 40px; background: var(--primary); border-color: var(--primary); color: #fff; font-weight: 900; cursor: pointer; box-shadow: 0 8px 18px rgba(23,107,135,.14); }
+    button:hover:not(:disabled) { background: var(--primary-strong); border-color: var(--primary-strong); }
+    button.secondary { background: #fff; color: var(--primary); border-color: rgba(23,107,135,.32); box-shadow: none; }
+    button.ghost { background: var(--surface-soft); color: #344256; border-color: var(--line); box-shadow: none; }
+    button.danger { background: var(--danger); border-color: var(--danger); }
+    button:disabled { opacity: .62; cursor: wait; box-shadow: none; }
+    .inline { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+    .actions { display: flex; gap: 7px; flex-wrap: wrap; }
+    .actions button { width: auto; min-height: 32px; padding: 6px 9px; font-size: 12px; box-shadow: none; }
+    .toolbar { display: grid; grid-template-columns: minmax(220px, 1.2fr) 120px auto auto; gap: 10px; align-items: end; margin-top: 14px; }
+    .toolbar label { margin-top: 0; }
+    .toolbar button { width: auto; min-width: 112px; }
+    .toolbar-info { display: inline-flex; align-items: center; min-height: 28px; width: fit-content; border: 1px solid var(--line-soft); border-radius: 999px; padding: 3px 10px; background: var(--surface-soft); color: #52677f; font-size: 12px; font-weight: 800; }
+    .table-wrap { width: 100%; overflow-x: auto; border-top: 1px solid var(--line-soft); }
+    table { width: 100%; border-collapse: collapse; font-size: 13px; }
+    th, td { border-bottom: 1px solid var(--line-soft); padding: 10px; text-align: left; vertical-align: top; }
+    th { background: #f7fafc; color: #52677f; font-size: 12px; font-weight: 900; white-space: nowrap; }
+    tbody tr:hover { background: #f8fbfc; }
+    .messages-table { table-layout: fixed; min-width: 1040px; }
+    .messages-table th:nth-child(1) { width: 142px; }
+    .messages-table th:nth-child(2) { width: 220px; }
+    .messages-table th:nth-child(3) { width: 190px; }
+    .messages-table th:nth-child(4) { width: 210px; }
+    .messages-table th:nth-child(6) { width: 112px; }
+    .mail-subject { color: #0f172a; font-weight: 850; line-height: 1.4; margin-bottom: 5px; overflow-wrap: anywhere; }
+    .mail-preview { color: #64748b; font-size: 12px; line-height: 1.48; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; word-break: break-word; }
+    .mono { font-family: Consolas, "Courier New", monospace; word-break: break-all; }
+    .pill { display: inline-flex; align-items: center; justify-content: center; min-height: 24px; border-radius: 999px; padding: 3px 9px; border: 1px solid transparent; background: var(--primary-soft); color: var(--primary-strong); font-size: 12px; font-weight: 900; white-space: nowrap; }
+    .pill.ok { background: var(--success-soft); border-color: rgba(4,120,87,.18); color: var(--success); }
+    .pill.off { background: var(--danger-soft); border-color: rgba(180,35,24,.16); color: var(--danger); }
+    .pill.warn { background: var(--warning-soft); border-color: rgba(180,83,9,.2); color: var(--warning); }
+    .toast { min-height: 22px; color: var(--danger); font-size: 13px; line-height: 1.45; margin-top: 10px; white-space: pre-wrap; }
+    .secret { margin-top: 12px; border: 1px solid rgba(4,120,87,.22); border-radius: 8px; padding: 12px; background: var(--success-soft); color: #065f46; font-size: 13px; font-weight: 800; line-height: 1.5; word-break: break-all; }
+    .empty { display: grid; place-items: center; min-height: 96px; color: #64748b; border: 1px dashed #c7d4df; border-radius: 8px; background: #f8fafc; font-size: 13px; }
+    dialog { width: min(580px, calc(100vw - 28px)); border: 1px solid var(--line); border-radius: 8px; padding: 0; box-shadow: 0 24px 70px rgba(15,23,42,.26); }
+    dialog::backdrop { background: rgba(15,23,42,.42); }
+    .dialog-body { padding: 20px; }
+    .dialog-actions { display: flex; gap: 10px; justify-content: flex-end; padding: 14px 20px; border-top: 1px solid var(--line-soft); background: var(--surface-soft); }
+    .dialog-actions button { width: auto; min-width: 96px; }
+    .hidden { display: none !important; }
+    @media (max-width: 1180px) { .grid { grid-template-columns: 1fr; } .toolbar { grid-template-columns: minmax(220px, 1fr) 120px auto auto; } }
+    @media (max-width: 920px) { main { width: min(100% - 28px, 1480px); } .topbar, .dashboard-head { align-items: flex-start; grid-template-columns: 1fr; flex-direction: column; } .top-actions { justify-content: flex-start; } .stats { grid-template-columns: repeat(2, minmax(0, 1fr)); } .toolbar { grid-template-columns: 1fr 1fr; } .toolbar button { width: 100%; } }
+    @media (max-width: 640px) { main { width: min(100% - 22px, 1480px); padding-top: 16px; } h1 { font-size: 21px; } .brand { align-items: flex-start; } .stats, .inline, .toolbar { grid-template-columns: 1fr; } table { min-width: 760px; } }
+  </style>
+</head>
+<body>
+<main>
+  <div class="topbar">
+    <div class="brand">
+      <div class="logo" aria-hidden="true">AD</div>
+      <div>
+        <h1>邮箱取码管理后台</h1>
+        <div class="muted">集中管理邮箱账号、Access Code、邮件记录和 CPA 账号巡检。</div>
+      </div>
+    </div>
+    <div class="top-actions">
+      <span class="status-chip">实时刷新</span>
+      <a class="top-link" href="/">用户取件页</a>
+    </div>
+  </div>
+
+  <section id="loginPanel" class="login-wrap">
+    <div class="login-card">
+      <div class="logo" aria-hidden="true">AD</div>
+      <h2>管理员登录</h2>
+      <p class="muted" style="margin-top:6px;">请输入环境变量 MAIL_CODE_ADMIN_PASSWORD 设置的后台密码。</p>
+      <label>后台密码
+        <input id="adminPassword" type="password" autocomplete="current-password" placeholder="MAIL_CODE_ADMIN_PASSWORD" />
+      </label>
+      <button id="adminLoginBtn" type="button" style="margin-top:14px;">登录后台</button>
+      <div id="loginError" class="toast"></div>
+    </div>
+  </section>
+
+  <section id="dashboard" class="hidden">
+    <div class="dashboard-head">
+      <div>
+        <h2>运营概览</h2>
+        <div id="lastSyncTime" class="muted">等待同步数据</div>
+      </div>
+      <div id="messageFilterInfo" class="toolbar-info">当前显示最近邮件</div>
+    </div>
+
+    <div class="stats">
+      <div class="stat"><span>邮箱账号</span><b id="statAccounts">0</b></div>
+      <div class="stat"><span>Access Code</span><b id="statGrants">0</b></div>
+      <div class="stat"><span>启用邮箱</span><b id="statEnabled">0</b></div>
+      <div class="stat"><span>邮件记录</span><b id="statMessages">0</b></div>
+    </div>
+
+    <div class="grid">
+      <div class="stack">
+        <section class="panel">
+          <div class="panel-head">
+            <div class="panel-title">
+              <h2>批量导入邮箱</h2>
+              <div class="muted">支持 Outlook OAuth 和自定义 IMAP。</div>
+            </div>
+            <span class="panel-badge">导入</span>
+          </div>
+          <div class="panel-body">
+            <label>账号类型
+              <select id="importProvider">
+                <option value="hotmail">Hotmail / Outlook OAuth</option>
+                <option value="custom-imap">自定义域名 IMAP</option>
+              </select>
+            </label>
+            <label>默认文件夹
+              <input id="importMailboxes" value="INBOX,Junk" />
+            </label>
+            <label>默认发件人过滤
+              <input id="importSenderFilters" placeholder="noreply@example.com, verify@x.com" />
+            </label>
+            <label>导入内容
+              <textarea id="importText" placeholder="Hotmail: email----password----clientId----refreshToken&#10;IMAP: alias@example.com----imap-user@example.com----app-password----imap.example.com----993"></textarea>
+            </label>
+            <button id="importBtn" type="button" style="margin-top:12px;">导入账号</button>
+            <div id="importError" class="toast"></div>
+          </div>
+        </section>
+
+        <section class="panel">
+          <div class="panel-head">
+            <div class="panel-title">
+              <h2>生成 Access Code</h2>
+              <div class="muted">为客户或订单绑定可取码邮箱。</div>
+            </div>
+            <span class="panel-badge">发放</span>
+          </div>
+          <div class="panel-body">
+            <label>绑定邮箱
+              <select id="grantAccount"></select>
+            </label>
+            <label>备注
+              <input id="grantName" placeholder="订单号 / 用户名 / 备注" />
+            </label>
+            <div class="inline">
+              <label>有效天数
+                <input id="grantDays" type="number" min="0" value="7" />
+              </label>
+              <label>最大取件次数
+                <input id="grantMaxReads" type="number" min="0" value="0" />
+              </label>
+            </div>
+            <button id="createGrantBtn" type="button" style="margin-top:12px;">生成凭证</button>
+            <div id="createdSecret" class="secret hidden"></div>
+            <div id="grantError" class="toast"></div>
+          </div>
+        </section>
+
+        <section class="panel">
+          <div class="panel-head">
+            <div class="panel-title">
+              <h2>CPA 巡检与刷新</h2>
+              <div class="muted">401 账号进入刷新池；需要短信或 OTP 时保留真实验证流程。</div>
+            </div>
+            <span class="panel-badge">CPA</span>
+          </div>
+          <div class="panel-body">
+            <label>CPA 地址
+              <input id="cpaBaseUrl" value="http://localhost:8317" />
+            </label>
+            <label>管理密钥
+              <input id="cpaManagementKey" type="password" autocomplete="off" />
+            </label>
+            <div class="inline">
+              <label>巡检数量
+                <input id="cpaMaxItems" type="number" min="1" max="100" value="20" />
+              </label>
+              <label>刷新数量
+                <input id="cpaRefreshLimit" type="number" min="1" max="100" value="20" />
+              </label>
+            </div>
+            <div class="actions" style="margin-top:12px;">
+              <button id="cpaScanBtn" type="button">巡检 401</button>
+              <button id="cpaQueueBtn" type="button" class="secondary">导入刷新池</button>
+              <button id="cpaRefreshBtn" type="button" class="secondary">刷新 RT 并更新 CPA</button>
+            </div>
+            <div class="actions" style="margin-top:9px;">
+              <button id="cpaOAuthStartBtn" type="button" class="ghost">CPA OAuth</button>
+              <button id="cpaOAuthCallbackBtn" type="button" class="ghost">提交回调</button>
+            </div>
+            <label>OAuth 回调地址
+              <input id="cpaOAuthCallback" placeholder="http://localhost/.../callback?code=...&state=..." />
+            </label>
+            <div id="cpaOAuthBox" class="secret hidden"></div>
+            <div id="cpaError" class="toast"></div>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead><tr><th>账号</th><th>CPA 文件</th><th>状态</th><th>RT</th><th>更新时间</th></tr></thead>
+              <tbody id="cpaQueueBody"></tbody>
+            </table>
+          </div>
+        </section>
+      </div>
+
+      <div class="stack">
+        <section class="panel">
+          <div class="panel-head">
+            <div class="panel-title">
+              <h2>邮件记录</h2>
+              <div class="muted">查看自动轮询和手动刷新保存的邮件摘要。</div>
+            </div>
+            <span class="panel-badge">记录</span>
+          </div>
+          <div class="panel-body">
+            <div class="toolbar">
+              <label>邮箱筛选
+                <select id="messageAccount"></select>
+              </label>
+              <label>读取数量
+                <input id="fetchTop" type="number" min="1" max="30" value="10" />
+              </label>
+              <button id="fetchSelectedBtn" type="button">刷新所选</button>
+              <button id="fetchAllBtn" type="button" class="secondary">刷新全部</button>
+            </div>
+            <div id="messageError" class="toast"></div>
+          </div>
+          <div class="table-wrap">
+            <table class="messages-table">
+              <thead><tr><th>时间</th><th>邮箱</th><th>发件人</th><th>收件人</th><th>标题</th><th>验证码</th></tr></thead>
+              <tbody id="messagesBody"></tbody>
+            </table>
+          </div>
+        </section>
+
+        <section class="panel">
+          <div class="panel-head">
+            <div class="panel-title">
+              <h2>邮箱账号</h2>
+              <div class="muted">维护账号状态、别名、文件夹和过滤条件。</div>
+            </div>
+            <span class="panel-badge">账号</span>
+          </div>
+          <div class="table-wrap" style="margin-top:14px;">
+            <table>
+              <thead><tr><th>邮箱</th><th>类型</th><th>别名 / 收件过滤</th><th>状态</th><th>最后检查</th><th>操作</th></tr></thead>
+              <tbody id="accountsBody"></tbody>
+            </table>
+          </div>
+        </section>
+
+        <section class="panel">
+          <div class="panel-head">
+            <div class="panel-title">
+              <h2>Access Code</h2>
+              <div class="muted">管理客户凭证的绑定、有效期和读取次数。</div>
+            </div>
+            <span class="panel-badge">凭证</span>
+          </div>
+          <div class="table-wrap" style="margin-top:14px;">
+            <table>
+              <thead><tr><th>备注</th><th>绑定邮箱</th><th>次数</th><th>状态</th><th>最后使用</th><th>操作</th></tr></thead>
+              <tbody id="grantsBody"></tbody>
+            </table>
+          </div>
+        </section>
+      </div>
+    </div>
+  </section>
+</main>
+<dialog id="accountDialog">
+  <div class="dialog-body">
+    <h2>编辑邮箱</h2>
+    <input id="editAccountId" type="hidden" />
+    <label>标签<input id="editAccountLabel" /></label>
+    <label>别名 / 目标收件地址<input id="editAccountTarget" placeholder="alias@example.com" /></label>
+    <label>文件夹<input id="editAccountMailboxes" placeholder="INBOX,Junk" /></label>
+    <label>发件人过滤<input id="editAccountSenders" /></label>
+    <label>标题过滤<input id="editAccountSubjects" /></label>
+    <label>关键词过滤<input id="editAccountKeywords" /></label>
+  </div>
+  <div class="dialog-actions">
+    <button id="closeAccountDialog" type="button" class="secondary">取消</button>
+    <button id="saveAccountBtn" type="button">保存</button>
+  </div>
+</dialog>
+
+<dialog id="grantDialog">
+  <div class="dialog-body">
+    <h2>编辑 Access Code</h2>
+    <input id="editGrantId" type="hidden" />
+    <label>备注<input id="editGrantName" /></label>
+    <label>绑定邮箱<select id="editGrantAccount"></select></label>
+    <div class="inline">
+      <label>过期时间<input id="editGrantExpires" type="datetime-local" /></label>
+      <label>最大取件次数<input id="editGrantMaxReads" type="number" min="0" /></label>
+    </div>
+    <label>已取次数<input id="editGrantReadCount" type="number" min="0" /></label>
+  </div>
+  <div class="dialog-actions">
+    <button id="closeGrantDialog" type="button" class="secondary">取消</button>
+    <button id="saveGrantBtn" type="button">保存</button>
+  </div>
+</dialog>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const splitList = (value) => String(value || '').split(',').map((item) => item.trim()).filter(Boolean);
+let adminToken = localStorage.getItem('mailCodeAdminToken') || '';
+let state = { accounts: [], grants: [], messages: [], messageAccountId: '', cpaQueue: [], cpaScanItems: [], cpaOAuthState: '' };
+let clientConfig = { adminRefreshIntervalSeconds: 10, autoPollEnabled: true, autoPollIntervalSeconds: 60, adminMessageLimit: 500 };
+let realtimeTimer = null;
+let refreshing = false;
+const actionBusy = new Set();
+
+function cleanPreview(value) {
+  return String(value || '')
+    .replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi, ' ')
+    .replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, ' ')
+    .replace(/<!--([\s\S]*?)-->/g, ' ')
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function escapeHtml(value) {
+  return String(value ?? '').replace(/[&<>"']/g, (char) => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
+  }[char]));
+}
+
+function fmtTime(msOrIso) {
+  if (!msOrIso) return '-';
+  const date = typeof msOrIso === 'number' ? new Date(msOrIso) : new Date(msOrIso);
+  if (Number.isNaN(date.getTime())) return String(msOrIso);
+  return date.toLocaleString('zh-CN', { hour12: false });
+}
+
+function toDateInput(ms) {
+  if (!ms) return '';
+  const date = new Date(ms);
+  if (Number.isNaN(date.getTime())) return '';
+  date.setMinutes(date.getMinutes() - date.getTimezoneOffset());
+  return date.toISOString().slice(0, 16);
+}
+
+function fromDateInput(value) { return value ? new Date(value).getTime() : 0; }
+function setError(id, message) { $(id).textContent = message || ''; }
+function showDialogError(message) { alert(message); }
+function setBusy(button, busy) { button.disabled = busy; }
+function adminMessageLimit() {
+  const limit = Number(clientConfig.adminMessageLimit || 500);
+  return Math.max(100, Math.min(limit, 5000));
+}
+
+async function api(path, body, method = 'POST') {
+  const response = await fetch(path, {
+    method,
+    headers: {
+      'Content-Type': 'application/json',
+      ...(adminToken ? { Authorization: `Bearer ${adminToken}` } : {}),
+    },
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  const text = await response.text();
+  let data = {};
+  try { data = text ? JSON.parse(text) : {}; } catch { data = { raw: text }; }
+  if (!response.ok || data.ok === false) throw new Error(data.error || text || `HTTP ${response.status}`);
+  return data;
+}
+
+async function loadClientConfig() {
+  try {
+    const response = await fetch('/api/client-config');
+    const data = await response.json();
+    if (data.ok) clientConfig = { ...clientConfig, ...data };
+  } catch {}
+}
+
+function cpaPayload(extra = {}) {
+  return {
+    baseUrl: $('cpaBaseUrl').value.trim(),
+    managementKey: $('cpaManagementKey').value.trim(),
+    maxItems: Number($('cpaMaxItems').value || 20),
+    ...extra,
+  };
+}
+
+async function loadCpaQueue() {
+  if (!adminToken) return;
+  const baseUrl = $('cpaBaseUrl')?.value?.trim() || '';
+  const data = await api(`/api/admin/cpa/queue?baseUrl=${encodeURIComponent(baseUrl)}`, null, 'GET');
+  state.cpaQueue = data.queue || [];
+  renderCpaQueue();
+}
+
+async function refresh() {
+  if (refreshing) return;
+  refreshing = true;
+  try {
+    const accountId = state.messageAccountId || $('messageAccount').value || '';
+    const data = await api('/api/admin/overview', null, 'GET');
+    const accounts = data.accounts || [];
+    const messageAccountId = accountId && accounts.some((account) => account.id === accountId) ? accountId : '';
+    let messages = data.messages || [];
+    if (messageAccountId) {
+      const messageData = await api(`/api/admin/messages?accountId=${encodeURIComponent(messageAccountId)}&limit=${adminMessageLimit()}`, null, 'GET');
+      messages = messageData.messages || [];
+    }
+    state.accounts = accounts;
+    state.grants = data.grants || [];
+    state.messages = messages;
+    state.messageAccountId = messageAccountId;
+    render();
+    await loadCpaQueue().catch(() => {});
+  } finally {
+    refreshing = false;
+  }
+}
+
+function realtimeRefreshAllowed() {
+  return Boolean(adminToken) && document.visibilityState === 'visible' && !$('accountDialog').open && !$('grantDialog').open;
+}
+
+function startRealtimeRefresh() {
+  if (realtimeTimer) clearInterval(realtimeTimer);
+  const intervalMs = Math.max(3, Number(clientConfig.adminRefreshIntervalSeconds || 10)) * 1000;
+  realtimeTimer = setInterval(() => {
+    if (!realtimeRefreshAllowed()) return;
+    refresh().catch(() => {});
+  }, intervalMs);
+}
+
+function accountLabel(account) {
+  const target = account.targetEmail && account.targetEmail !== account.email ? ` -> ${account.targetEmail}` : '';
+  return `${account.email}${target}`;
+}
+
+function renderSelects() {
+  const selectedGrantAccount = $('grantAccount').value;
+  const selectedEditGrantAccount = $('editGrantAccount').value;
+  const selectedMessageAccount = state.messageAccountId;
+  const accountOptions = state.accounts.map((account) =>
+    `<option value="${escapeHtml(account.id)}">${escapeHtml(accountLabel(account))} (${escapeHtml(account.provider)})</option>`
+  ).join('');
+  $('grantAccount').innerHTML = accountOptions || '<option value="">请先导入邮箱</option>';
+  $('editGrantAccount').innerHTML = accountOptions || '<option value="">请先导入邮箱</option>';
+  $('messageAccount').innerHTML = `<option value="">全部邮箱</option>${accountOptions}`;
+  if (selectedGrantAccount && state.accounts.some((account) => account.id === selectedGrantAccount)) $('grantAccount').value = selectedGrantAccount;
+  if (selectedEditGrantAccount && state.accounts.some((account) => account.id === selectedEditGrantAccount)) $('editGrantAccount').value = selectedEditGrantAccount;
+  if (selectedMessageAccount === '' || state.accounts.some((account) => account.id === selectedMessageAccount)) $('messageAccount').value = selectedMessageAccount;
+}
+
+function render() {
+  $('dashboard').classList.remove('hidden');
+  $('loginPanel').classList.add('hidden');
+  $('statAccounts').textContent = state.accounts.length;
+  $('statGrants').textContent = state.grants.length;
+  $('statEnabled').textContent = state.accounts.filter((item) => item.enabled).length;
+  $('statMessages').textContent = state.messages.length;
+  $('lastSyncTime').textContent = `最后同步：${fmtTime(Date.now())}`;
+  renderSelects();
+  renderMessages();
+  renderAccounts();
+  renderGrants();
+  renderCpaQueue();
+}
+
+function renderMessages() {
+  const selectedAccount = state.accounts.find((account) => account.id === state.messageAccountId);
+  const limit = adminMessageLimit();
+  $('messageFilterInfo').textContent = selectedAccount
+    ? `当前显示 ${accountLabel(selectedAccount)} 最近 ${state.messages.length} 封邮件（最多 ${limit} 封）`
+    : `当前显示最近 ${state.messages.length} 封邮件`;
+  if (!state.messages.length) {
+    $('messagesBody').innerHTML = '<tr><td colspan="6"><div class="empty">暂无邮件记录</div></td></tr>';
+    return;
+  }
+  $('messagesBody').innerHTML = state.messages.map((message) => {
+    const account = message.account || {};
+    const accountName = account.targetEmail || account.email || message.accountId;
+    const preview = cleanPreview(message.bodyPreview || '');
+    const recipients = (message.recipients || []).join(', ') || '-';
+    return `
+      <tr>
+        <td>${escapeHtml(fmtTime(message.receivedTimestamp || message.receivedDateTime || message.fetchedAt))}</td>
+        <td><div class="mono">${escapeHtml(accountName)}</div><div class="muted">${escapeHtml(message.mailbox || '')}</div></td>
+        <td class="mono">${escapeHtml(message.sender || '-')}</td>
+        <td class="mono">${escapeHtml(recipients)}</td>
+        <td><div class="mail-subject">${escapeHtml(message.subject || '(无标题)')}</div><div class="mail-preview">${escapeHtml(preview || '无预览内容')}</div></td>
+        <td>${message.code ? `<span class="pill ok">${escapeHtml(message.code)}</span>` : '-'}</td>
+      </tr>`;
+  }).join('');
+}
+function renderAccounts() {
+  if (!state.accounts.length) {
+    $('accountsBody').innerHTML = '<tr><td colspan="6"><div class="empty">暂无邮箱账号</div></td></tr>';
+    return;
+  }
+  $('accountsBody').innerHTML = state.accounts.map((account) => `
+    <tr>
+      <td><div class="mono">${escapeHtml(account.email)}</div><div class="muted">${escapeHtml(account.label || '')}</div>${account.lastError ? `<div class="toast">${escapeHtml(account.lastError)}</div>` : ''}</td>
+      <td>${escapeHtml(account.provider)}</td>
+      <td><div class="mono">${escapeHtml(account.targetEmail || account.email)}</div><div class="muted">${escapeHtml((account.mailboxes || []).join(', '))}</div></td>
+      <td><span class="pill ${account.enabled ? 'ok' : 'off'}">${account.enabled ? escapeHtml(account.status || 'ready') : 'disabled'}</span></td>
+      <td>${escapeHtml(fmtTime(account.lastCheckedAt))}</td>
+      <td><div class="actions">
+        <button class="secondary" data-account-edit="${escapeHtml(account.id)}">编辑</button>
+        <button class="secondary" data-account-fetch="${escapeHtml(account.id)}">刷新</button>
+        <button class="ghost" data-account-toggle="${escapeHtml(account.id)}">${account.enabled ? '禁用' : '启用'}</button>
+        <button class="danger" data-account-delete="${escapeHtml(account.id)}">删除</button>
+      </div></td>
+    </tr>`).join('');
+}
+
+function renderGrants() {
+  if (!state.grants.length) {
+    $('grantsBody').innerHTML = '<tr><td colspan="6"><div class="empty">暂无 Access Code</div></td></tr>';
+    return;
+  }
+  $('grantsBody').innerHTML = state.grants.map((grant) => {
+    const limit = grant.maxReads ? `${grant.readCount}/${grant.maxReads}` : `${grant.readCount}/不限`;
+    const expired = grant.expiresAt && grant.expiresAt < Date.now();
+    const statusClass = !grant.enabled ? 'off' : expired ? 'warn' : 'ok';
+    const statusText = !grant.enabled ? 'disabled' : expired ? 'expired' : 'enabled';
+    return `
+      <tr>
+        <td>${escapeHtml(grant.name || '-')}<div class="muted mono">${escapeHtml(grant.id)}</div></td>
+        <td><span class="mono">${escapeHtml(grant.account?.targetEmail || grant.account?.email || grant.accountId)}</span></td>
+        <td>${escapeHtml(limit)}<div class="muted">过期：${escapeHtml(grant.expiresAt ? fmtTime(grant.expiresAt) : '永不过期')}</div></td>
+        <td><span class="pill ${statusClass}">${statusText}</span></td>
+        <td>${escapeHtml(fmtTime(grant.lastUsedAt))}</td>
+        <td><div class="actions">
+          <button class="secondary" data-grant-edit="${escapeHtml(grant.id)}">编辑</button>
+          <button class="secondary" data-grant-regen="${escapeHtml(grant.id)}">重生成</button>
+          <button class="ghost" data-grant-reset="${escapeHtml(grant.id)}">清次数</button>
+          <button class="ghost" data-grant-toggle="${escapeHtml(grant.id)}">${grant.enabled ? '禁用' : '启用'}</button>
+          <button class="danger" data-grant-delete="${escapeHtml(grant.id)}">删除</button>
+        </div></td>
+      </tr>`;
+  }).join('');
+}
+
+function renderCpaQueue() {
+  if (!state.cpaQueue.length) {
+    $('cpaQueueBody').innerHTML = '<tr><td colspan="5"><div class="empty">暂无 CPA 刷新池记录</div></td></tr>';
+    return;
+  }
+  $('cpaQueueBody').innerHTML = state.cpaQueue.map((item) => {
+    const statusClass = item.status === 'uploaded' || item.status === 'refreshed' || item.status === 'rt_rotated' ? 'ok'
+      : item.status === 'needs_login_verification' || item.status === 'rt_invalid' ? 'warn'
+      : item.status === 'error' ? 'off' : '';
+    return `
+      <tr>
+        <td><div class="mono">${escapeHtml(item.email || '-')}</div>${item.lastError ? `<div class="toast">${escapeHtml(item.lastError)}</div>` : ''}</td>
+        <td><div class="mono">${escapeHtml(item.name || '-')}</div><div class="muted">${escapeHtml(item.authIndex || '')}</div></td>
+        <td><span class="pill ${statusClass}">${escapeHtml(item.statusLabel || item.status || '-')}</span><div class="muted">${escapeHtml(item.action || '')}</div></td>
+        <td>${item.hasRefreshToken ? '<span class="pill ok">有 RT</span>' : '<span class="pill warn">需验证</span>'}</td>
+        <td>${escapeHtml(fmtTime(item.refreshedAt || item.updatedAt))}</td>
+      </tr>`;
+  }).join('');
+}
+
+function openAccountDialog(account) {
+  if (!account) {
+    setError('messageError', '账号记录已变化，请刷新后重试');
+    return;
+  }
+  $('editAccountId').value = account.id;
+  $('editAccountLabel').value = account.label || '';
+  $('editAccountTarget').value = account.targetEmail || '';
+  $('editAccountMailboxes').value = (account.mailboxes || []).join(', ');
+  $('editAccountSenders').value = (account.senderFilters || []).join(', ');
+  $('editAccountSubjects').value = (account.subjectFilters || []).join(', ');
+  $('editAccountKeywords').value = (account.requiredKeywords || []).join(', ');
+  $('accountDialog').showModal();
+}
+
+function openGrantDialog(grant) {
+  if (!grant) {
+    setError('grantError', 'Access Code 记录已变化，请刷新后重试');
+    return;
+  }
+  $('editGrantId').value = grant.id;
+  $('editGrantName').value = grant.name || '';
+  $('editGrantAccount').value = grant.accountId;
+  $('editGrantExpires').value = toDateInput(grant.expiresAt);
+  $('editGrantMaxReads').value = grant.maxReads || 0;
+  $('editGrantReadCount').value = grant.readCount || 0;
+  $('grantDialog').showModal();
+}
+
+async function fetchMessages(accountId = '') {
+  setError('messageError', '');
+  state.messageAccountId = accountId;
+  const data = await api('/api/admin/messages/fetch', { accountId, top: Number($('fetchTop').value || 10) });
+  state.accounts = data.accounts || state.accounts;
+  state.messages = data.messages || state.messages;
+  render();
+  if (data.errors?.length) setError('messageError', data.errors.map((item) => `${item.email}: ${item.error}`).join('\n'));
+}
+
+async function loadStoredMessages(accountId = '') {
+  setError('messageError', '');
+  state.messageAccountId = accountId;
+  const query = new URLSearchParams({ limit: accountId ? String(adminMessageLimit()) : '100' });
+  if (accountId) query.set('accountId', accountId);
+  const data = await api(`/api/admin/messages?${query.toString()}`, null, 'GET');
+  state.messages = data.messages || [];
+  render();
+}
+
+$('adminLoginBtn').addEventListener('click', async () => {
+  setError('loginError', '');
+  setBusy($('adminLoginBtn'), true);
+  try {
+    const data = await api('/api/admin/login', { password: $('adminPassword').value });
+    adminToken = data.token;
+    localStorage.setItem('mailCodeAdminToken', adminToken);
+    await refresh();
+    startRealtimeRefresh();
+  } catch (error) {
+    setError('loginError', error.message);
+  } finally {
+    setBusy($('adminLoginBtn'), false);
+  }
+});
+
+$('importBtn').addEventListener('click', async () => {
+  setError('importError', '');
+  setBusy($('importBtn'), true);
+  try {
+    const data = await api('/api/admin/accounts/import', {
+      provider: $('importProvider').value,
+      mailboxes: splitList($('importMailboxes').value),
+      senderFilters: splitList($('importSenderFilters').value),
+      text: $('importText').value,
+    });
+    state.accounts = data.accounts || [];
+    $('importText').value = '';
+    render();
+  } catch (error) {
+    setError('importError', error.message);
+  } finally {
+    setBusy($('importBtn'), false);
+  }
+});
+
+$('createGrantBtn').addEventListener('click', async () => {
+  setError('grantError', '');
+  $('createdSecret').classList.add('hidden');
+  setBusy($('createGrantBtn'), true);
+  try {
+    const data = await api('/api/admin/grants/create', {
+      accountId: $('grantAccount').value,
+      name: $('grantName').value,
+      expiresInDays: Number($('grantDays').value || 0),
+      maxReads: Number($('grantMaxReads').value || 0),
+    });
+    state.grants = data.grants || [];
+    $('createdSecret').textContent = `请立即交给用户：${data.accessCode}`;
+    $('createdSecret').classList.remove('hidden');
+    render();
+  } catch (error) {
+    setError('grantError', error.message);
+  } finally {
+    setBusy($('createGrantBtn'), false);
+  }
+});
+$('fetchSelectedBtn').addEventListener('click', async () => {
+  setBusy($('fetchSelectedBtn'), true);
+  try { await fetchMessages($('messageAccount').value); } catch (error) { setError('messageError', error.message); }
+  finally { setBusy($('fetchSelectedBtn'), false); }
+});
+
+$('fetchAllBtn').addEventListener('click', async () => {
+  setBusy($('fetchAllBtn'), true);
+  try { await fetchMessages(''); } catch (error) { setError('messageError', error.message); }
+  finally { setBusy($('fetchAllBtn'), false); }
+});
+
+$('messageAccount').addEventListener('change', async () => {
+  try { await loadStoredMessages($('messageAccount').value); } catch (error) { setError('messageError', error.message); }
+});
+
+$('saveAccountBtn').addEventListener('click', async () => {
+  setBusy($('saveAccountBtn'), true);
+  try {
+    const data = await api('/api/admin/accounts/patch', {
+      accountId: $('editAccountId').value,
+      updates: {
+        label: $('editAccountLabel').value,
+        targetEmail: $('editAccountTarget').value,
+        mailboxes: splitList($('editAccountMailboxes').value),
+        senderFilters: splitList($('editAccountSenders').value),
+        subjectFilters: splitList($('editAccountSubjects').value),
+        requiredKeywords: splitList($('editAccountKeywords').value),
+      },
+    });
+    state.accounts = data.accounts || state.accounts;
+    $('accountDialog').close();
+    if (state.messageAccountId && state.accounts.some((account) => account.id === state.messageAccountId)) await loadStoredMessages(state.messageAccountId);
+    else { state.messageAccountId = ''; state.messages = data.messages || state.messages; render(); }
+  } catch (error) {
+    showDialogError(error.message);
+  } finally {
+    setBusy($('saveAccountBtn'), false);
+  }
+});
+
+$('saveGrantBtn').addEventListener('click', async () => {
+  setBusy($('saveGrantBtn'), true);
+  try {
+    const data = await api('/api/admin/grants/patch', {
+      grantId: $('editGrantId').value,
+      updates: {
+        name: $('editGrantName').value,
+        accountId: $('editGrantAccount').value,
+        expiresAt: fromDateInput($('editGrantExpires').value),
+        maxReads: Number($('editGrantMaxReads').value || 0),
+        readCount: Number($('editGrantReadCount').value || 0),
+      },
+    });
+    state.grants = data.grants || state.grants;
+    $('grantDialog').close();
+    render();
+  } catch (error) {
+    showDialogError(error.message);
+  } finally {
+    setBusy($('saveGrantBtn'), false);
+  }
+});
+
+$('closeAccountDialog').addEventListener('click', () => $('accountDialog').close());
+$('closeGrantDialog').addEventListener('click', () => $('grantDialog').close());
+
+$('cpaScanBtn').addEventListener('click', async () => {
+  setError('cpaError', '');
+  setBusy($('cpaScanBtn'), true);
+  try {
+    const data = await api('/api/admin/cpa/scan-401', cpaPayload());
+    state.cpaScanItems = data.candidates || [];
+    setError('cpaError', data.summary ? `发现 401：${data.summary.detected401}；有 RT：${data.summary.withRefreshToken}；需真实验证：${data.summary.needsLoginVerification}；下载失败：${data.summary.downloadFailed || 0}` : '');
+  } catch (error) {
+    setError('cpaError', error.message);
+  } finally {
+    setBusy($('cpaScanBtn'), false);
+  }
+});
+
+$('cpaQueueBtn').addEventListener('click', async () => {
+  setError('cpaError', '');
+  setBusy($('cpaQueueBtn'), true);
+  try {
+    const data = await api('/api/admin/cpa/queue-401', cpaPayload({ items: state.cpaScanItems }));
+    state.cpaQueue = data.queue || [];
+    renderCpaQueue();
+    const errorText = (data.errors || []).map((item) => `${item.name || ''}: ${item.error}`).join('\n');
+    setError('cpaError', `已导入刷新池：${data.imported || 0}${errorText ? `\n${errorText}` : ''}`);
+  } catch (error) {
+    setError('cpaError', error.message);
+  } finally {
+    setBusy($('cpaQueueBtn'), false);
+  }
+});
+
+$('cpaRefreshBtn').addEventListener('click', async () => {
+  setError('cpaError', '');
+  setBusy($('cpaRefreshBtn'), true);
+  try {
+    const data = await api('/api/admin/cpa/refresh-rt', cpaPayload({ limit: Number($('cpaRefreshLimit').value || 20), updateCpa: true }));
+    state.cpaQueue = data.queue || [];
+    renderCpaQueue();
+    const summary = data.summary || {};
+    setError('cpaError', `刷新：${summary.refreshed || 0}；更新 CPA：${summary.uploaded || 0}；失败：${summary.failed || 0}；需真实验证：${summary.needsLoginVerification || 0}`);
+  } catch (error) {
+    setError('cpaError', error.message);
+  } finally {
+    setBusy($('cpaRefreshBtn'), false);
+  }
+});
+
+$('cpaOAuthStartBtn').addEventListener('click', async () => {
+  setError('cpaError', '');
+  $('cpaOAuthBox').classList.add('hidden');
+  $('cpaOAuthBox').replaceChildren();
+  setBusy($('cpaOAuthStartBtn'), true);
+  try {
+    const data = await api('/api/admin/cpa/oauth/start', cpaPayload());
+    state.cpaOAuthState = data.state || '';
+    const authorizeUrl = String(data.authorizeUrl || data.authorize_url || '');
+    const parsed = new URL(authorizeUrl);
+    if (!['http:', 'https:'].includes(parsed.protocol)) throw new Error('CPA 返回的 OAuth 链接无效');
+    const box = $('cpaOAuthBox');
+    const label = document.createTextNode('OAuth 链接：');
+    const link = document.createElement('a');
+    link.href = parsed.href;
+    link.target = '_blank';
+    link.rel = 'noreferrer';
+    link.textContent = '打开授权';
+    const text = document.createElement('span');
+    text.className = 'mono';
+    text.textContent = parsed.href;
+    box.replaceChildren(label, link, document.createElement('br'), text);
+    $('cpaOAuthBox').classList.remove('hidden');
+  } catch (error) {
+    setError('cpaError', error.message);
+  } finally {
+    setBusy($('cpaOAuthStartBtn'), false);
+  }
+});
+
+$('cpaOAuthCallbackBtn').addEventListener('click', async () => {
+  setError('cpaError', '');
+  setBusy($('cpaOAuthCallbackBtn'), true);
+  try {
+    const data = await api('/api/admin/cpa/oauth/callback', cpaPayload({ callbackUrl: $('cpaOAuthCallback').value, state: state.cpaOAuthState }));
+    setError('cpaError', data.message || 'CPA 已接收 OAuth 回调');
+    await loadCpaQueue().catch(() => {});
+  } catch (error) {
+    setError('cpaError', error.message);
+  } finally {
+    setBusy($('cpaOAuthCallbackBtn'), false);
+  }
+});
+
+$('cpaBaseUrl').addEventListener('change', () => loadCpaQueue().catch(() => {}));
+
+document.addEventListener('click', async (event) => {
+  const target = event.target;
+  if (!(target instanceof HTMLElement)) return;
+  const accountEdit = target.dataset.accountEdit;
+  const accountFetch = target.dataset.accountFetch;
+  const accountToggle = target.dataset.accountToggle;
+  const accountDelete = target.dataset.accountDelete;
+  const grantEdit = target.dataset.grantEdit;
+  const grantToggle = target.dataset.grantToggle;
+  const grantReset = target.dataset.grantReset;
+  const grantRegen = target.dataset.grantRegen;
+  const grantDelete = target.dataset.grantDelete;
+  const actionKey = accountFetch ? `accountFetch:${accountFetch}`
+    : accountToggle ? `accountToggle:${accountToggle}`
+    : accountDelete ? `accountDelete:${accountDelete}`
+    : grantToggle ? `grantToggle:${grantToggle}`
+    : grantReset ? `grantReset:${grantReset}`
+    : grantRegen ? `grantRegen:${grantRegen}`
+    : grantDelete ? `grantDelete:${grantDelete}`
+    : '';
+  if (actionKey && actionBusy.has(actionKey)) return;
+  try {
+    if (accountEdit) openAccountDialog(state.accounts.find((item) => item.id === accountEdit));
+    if (actionKey) {
+      actionBusy.add(actionKey);
+      target.disabled = true;
+    }
+    if (accountFetch) await fetchMessages(accountFetch);
+    if (accountToggle) {
+      const account = state.accounts.find((item) => item.id === accountToggle);
+      if (!account) throw new Error('账号记录已变化，请刷新后重试');
+      const data = await api('/api/admin/accounts/patch', { accountId: accountToggle, updates: { enabled: !account.enabled } });
+      state.accounts = data.accounts || state.accounts;
+      if (state.messageAccountId && state.accounts.some((item) => item.id === state.messageAccountId)) await loadStoredMessages(state.messageAccountId);
+      else { state.messageAccountId = ''; state.messages = data.messages || state.messages; render(); }
+    }
+    if (accountDelete && confirm('确认删除这个邮箱账号及其全部 Access Code？')) {
+      const data = await api('/api/admin/accounts/delete', { accountId: accountDelete });
+      state.accounts = data.accounts || [];
+      state.grants = data.grants || [];
+      if (state.messageAccountId === accountDelete) state.messageAccountId = '';
+      state.messages = data.messages || [];
+      render();
+    }
+    if (grantEdit) openGrantDialog(state.grants.find((item) => item.id === grantEdit));
+    if (grantToggle) {
+      const grant = state.grants.find((item) => item.id === grantToggle);
+      if (!grant) throw new Error('Access Code 记录已变化，请刷新后重试');
+      const data = await api('/api/admin/grants/patch', { grantId: grantToggle, updates: { enabled: !grant.enabled } });
+      state.grants = data.grants || state.grants;
+      render();
+    }
+    if (grantReset) {
+      const data = await api('/api/admin/grants/patch', { grantId: grantReset, updates: { readCount: 0 } });
+      state.grants = data.grants || state.grants;
+      render();
+    }
+    if (grantRegen && confirm('重新生成后旧 Access Code 会立即失效，确认继续？')) {
+      const data = await api('/api/admin/grants/regenerate', { grantId: grantRegen });
+      state.grants = data.grants || state.grants;
+      $('createdSecret').textContent = `新的 Access Code：${data.accessCode}`;
+      $('createdSecret').classList.remove('hidden');
+      render();
+    }
+    if (grantDelete && confirm('确认删除这个 Access Code？')) {
+      const data = await api('/api/admin/grants/delete', { grantId: grantDelete });
+      state.grants = data.grants || [];
+      render();
+    }
+  } catch (error) {
+    alert(error.message);
+  } finally {
+    if (actionKey) {
+      actionBusy.delete(actionKey);
+      target.disabled = false;
+    }
+  }
+});
+
+loadClientConfig().then(() => {
+  if (!adminToken) return;
+  startRealtimeRefresh();
+  refresh().catch(() => {
+    adminToken = '';
+    localStorage.removeItem('mailCodeAdminToken');
+  });
+});
+</script>
+</body>
+</html>

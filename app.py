@@ -13,6 +13,7 @@ import sqlite3
 import threading
 import time
 import traceback
+import cpa_support
 from datetime import datetime, timezone
 from email.header import decode_header
 from email.utils import getaddresses, parseaddr, parsedate_to_datetime
@@ -34,6 +35,9 @@ AUTO_POLL_INTERVAL_SECONDS_DEFAULT = 60
 AUTO_POLL_START_DELAY_SECONDS = 5
 WEBHOOK_TIMEOUT_SECONDS_DEFAULT = 8
 DEFAULT_DB_PATH = Path(__file__).with_name("data").joinpath("mail-code-helper.sqlite3")
+ADMIN_MESSAGE_LIMIT_DEFAULT = 500
+MAX_JSON_BODY_BYTES_DEFAULT = 5 * 1024 * 1024
+CPA_REFRESH_LOCK = threading.Lock()
 
 LIVE_TOKEN_URL = "https://login.live.com/oauth20_token.srf"
 ENTRA_COMMON_TOKEN_URL = "https://login.microsoftonline.com/common/oauth2/v2.0/token"
@@ -136,6 +140,20 @@ def get_admin_refresh_interval_seconds():
         return 10
 
 
+def get_admin_message_limit():
+    try:
+        return max(100, min(int(os.environ.get("MAIL_CODE_ADMIN_MESSAGE_LIMIT") or ADMIN_MESSAGE_LIMIT_DEFAULT), 5000))
+    except (TypeError, ValueError):
+        return ADMIN_MESSAGE_LIMIT_DEFAULT
+
+
+def get_max_json_body_bytes():
+    try:
+        return max(1024, min(int(os.environ.get("MAIL_CODE_MAX_JSON_BODY_BYTES") or MAX_JSON_BODY_BYTES_DEFAULT), 50 * 1024 * 1024))
+    except (TypeError, ValueError):
+        return MAX_JSON_BODY_BYTES_DEFAULT
+
+
 def get_user_code_poll_config():
     try:
         interval = max(2, int(os.environ.get("MAIL_CODE_USER_CODE_POLL_INTERVAL_SECONDS") or 5))
@@ -229,11 +247,13 @@ def text_response(handler, status, content_type, body, include_body=True):
 
 def read_json_payload(handler):
     length = int(handler.headers.get("Content-Length", "0") or 0)
+    if length > get_max_json_body_bytes():
+        raise ValueError(f"JSON payload too large: {length} bytes")
     raw = handler.rfile.read(length) if length > 0 else b"{}"
     try:
         return json.loads(raw.decode("utf-8"))
     except Exception as exc:
-        raise RuntimeError(f"Invalid JSON payload: {exc}") from exc
+        raise ValueError(f"Invalid JSON payload: {exc}") from exc
 
 
 def post_form(url, data):
@@ -366,8 +386,18 @@ def init_db():
                 UNIQUE(account_id, message_key, mailbox),
                 FOREIGN KEY(account_id) REFERENCES mail_accounts(id) ON DELETE CASCADE
             );
+
+            CREATE INDEX IF NOT EXISTS idx_mail_accounts_enabled_created
+              ON mail_accounts(enabled, created_at);
+            CREATE INDEX IF NOT EXISTS idx_access_grants_account
+              ON access_grants(account_id);
+            CREATE INDEX IF NOT EXISTS idx_mail_message_logs_account_time
+              ON mail_message_logs(account_id, received_timestamp, fetched_at);
+            CREATE INDEX IF NOT EXISTS idx_mail_message_logs_time
+              ON mail_message_logs(received_timestamp, fetched_at);
             """
         )
+        cpa_support.init_db(conn)
 
 
 def json_loads(value, fallback):
@@ -416,11 +446,15 @@ def verify_token(token, expected_kind):
     if "." not in raw:
         raise PermissionError("Unauthorized: missing session token")
     body, signature = raw.rsplit(".", 1)
-    expected_signature = hmac.new(get_signing_secret().encode("utf-8"), body.encode("ascii"), hashlib.sha256).digest()
-    actual_signature = base64.urlsafe_b64decode((signature + "=" * (-len(signature) % 4)).encode("ascii"))
+    try:
+        body_bytes = body.encode("ascii")
+        expected_signature = hmac.new(get_signing_secret().encode("utf-8"), body_bytes, hashlib.sha256).digest()
+        actual_signature = base64.urlsafe_b64decode((signature + "=" * (-len(signature) % 4)).encode("ascii"))
+        payload = b64url_decode(body)
+    except Exception as exc:
+        raise PermissionError("Unauthorized: invalid session token") from exc
     if not hmac.compare_digest(actual_signature, expected_signature):
         raise PermissionError("Unauthorized: invalid session token")
-    payload = b64url_decode(body)
     if payload.get("kind") != expected_kind:
         raise PermissionError("Unauthorized: invalid session scope")
     if int(payload.get("exp") or 0) < int(time.time()):
@@ -1468,16 +1502,17 @@ def safe_message_log(row):
 
 def list_message_logs(conn, account_id="", limit=100):
     limit = int(limit or 0)
+    if limit <= 0:
+        limit = get_admin_message_limit()
     params = []
     where = ""
     if account_id:
         where = "WHERE m.account_id = ?"
         params.append(account_id)
     limit_clause = ""
-    if limit > 0:
-        limit = min(limit, 5000)
-        limit_clause = "LIMIT ?"
-        params.append(limit)
+    limit = min(limit, 5000)
+    limit_clause = "LIMIT ?"
+    params.append(limit)
     rows = conn.execute(
         f"""
         SELECT
@@ -1719,8 +1754,9 @@ def insert_accounts(conn, accounts):
 def create_access_grant(conn, payload):
     account_id = str(payload.get("accountId") or payload.get("account_id") or "").strip()
     if not account_id:
-        raise RuntimeError("Missing accountId")
-    load_account(conn, account_id)
+        raise ValueError("Missing accountId")
+    if not conn.execute("SELECT id FROM mail_accounts WHERE id = ?", (account_id,)).fetchone():
+        raise ValueError("Account not found")
     access_code = f"mc_{secrets.token_urlsafe(18)}"
     timestamp = now_ms()
     expires_in_days = int(payload.get("expiresInDays") or payload.get("expires_in_days") or 0)
@@ -1768,11 +1804,11 @@ class MailCodeHandler(BaseHTTPRequestHandler):
             text_response(self, 200, "text/plain; charset=utf-8", "mail-code-helper", include_body=False)
             return
         if path in {"/admin", "/admin/"}:
-            target = static_file("admin.html")
+            target = static_file("admin-v2.html")
             if target.exists():
                 text_response(self, 200, "text/html; charset=utf-8", target.read_text(encoding="utf-8"), include_body=False)
                 return
-            json_response(self, 404, {"ok": False, "error": "admin.html not found"}, include_body=False)
+            json_response(self, 404, {"ok": False, "error": "admin-v2.html not found"}, include_body=False)
             return
         if path in {"/health", "/api/client-config"}:
             json_response(self, 200, {"ok": True}, include_body=False)
@@ -1794,11 +1830,11 @@ class MailCodeHandler(BaseHTTPRequestHandler):
             text_response(self, 200, "text/plain; charset=utf-8", "mail-code-helper")
             return
         if path in {"/admin", "/admin/"}:
-            target = static_file("admin.html")
+            target = static_file("admin-v2.html")
             if target.exists():
                 text_response(self, 200, "text/html; charset=utf-8", target.read_text(encoding="utf-8"))
                 return
-            json_response(self, 404, {"ok": False, "error": "admin.html not found"})
+            json_response(self, 404, {"ok": False, "error": "admin-v2.html not found"})
             return
         if path == "/health":
             json_response(self, 200, {
@@ -1820,6 +1856,7 @@ class MailCodeHandler(BaseHTTPRequestHandler):
                 "adminRefreshIntervalSeconds": get_admin_refresh_interval_seconds(),
                 "autoPollEnabled": get_auto_poll_interval_seconds() > 0,
                 "autoPollIntervalSeconds": get_auto_poll_interval_seconds(),
+                "adminMessageLimit": get_admin_message_limit(),
             })
             return
         if path == "/api/admin/overview":
@@ -1855,6 +1892,18 @@ class MailCodeHandler(BaseHTTPRequestHandler):
                 json_response(self, 401, {"ok": False, "error": str(exc)})
             except ValueError as exc:
                 json_response(self, 400, {"ok": False, "error": str(exc)})
+            except Exception as exc:
+                json_response(self, 500, {"ok": False, "error": str(exc)})
+            return
+        if path == "/api/admin/cpa/queue":
+            try:
+                require_admin_session(self)
+                query = parse_qs(urlparse(self.path).query)
+                base_url = str((query.get("baseUrl") or query.get("base_url") or [""])[0] or "").strip()
+                with db_connect() as conn:
+                    json_response(self, 200, {"ok": True, "queue": cpa_support.list_queue(conn, base_url)})
+            except PermissionError as exc:
+                json_response(self, 401, {"ok": False, "error": str(exc)})
             except Exception as exc:
                 json_response(self, 500, {"ok": False, "error": str(exc)})
             return
@@ -1955,6 +2004,42 @@ class MailCodeHandler(BaseHTTPRequestHandler):
 
     def handle_admin_post(self, path, payload):
         with db_connect() as conn:
+            if path == "/api/admin/cpa/scan-401":
+                result = cpa_support.scan_401(payload)
+                json_response(self, 200, result)
+                return
+
+            if path == "/api/admin/cpa/queue-401":
+                result = cpa_support.import_401_to_queue(conn, payload)
+                conn.commit()
+                json_response(self, 200, result)
+                return
+
+            if path == "/api/admin/cpa/refresh-rt":
+                if not CPA_REFRESH_LOCK.acquire(blocking=False):
+                    json_response(self, 409, {
+                        "ok": False,
+                        "error": "CPA RT 刷新正在运行，请等待本轮完成后再试",
+                    })
+                    return
+                try:
+                    result = cpa_support.refresh_queue(conn, payload)
+                    conn.commit()
+                    json_response(self, 200, result)
+                finally:
+                    CPA_REFRESH_LOCK.release()
+                return
+
+            if path == "/api/admin/cpa/oauth/start":
+                result = cpa_support.direct_oauth_start(payload)
+                json_response(self, 200, result)
+                return
+
+            if path == "/api/admin/cpa/oauth/callback":
+                result = cpa_support.direct_oauth_callback(payload)
+                json_response(self, 200, result)
+                return
+
             if path == "/api/admin/accounts/import":
                 provider = str(payload.get("provider") or "hotmail").strip().lower()
                 options = {
@@ -1973,7 +2058,9 @@ class MailCodeHandler(BaseHTTPRequestHandler):
             if path == "/api/admin/accounts/patch":
                 account_id = str(payload.get("accountId") or payload.get("id") or "").strip()
                 if not account_id:
-                    raise RuntimeError("Missing accountId")
+                    raise ValueError("Missing accountId")
+                if not conn.execute("SELECT id FROM mail_accounts WHERE id = ?", (account_id,)).fetchone():
+                    raise ValueError("Account not found")
                 updates = payload.get("updates") if isinstance(payload.get("updates"), dict) else {}
                 allowed = {
                     "enabled": ("enabled", lambda value: 1 if value else 0),
@@ -2009,9 +2096,15 @@ class MailCodeHandler(BaseHTTPRequestHandler):
             if path == "/api/admin/messages/fetch":
                 account_id = str(payload.get("accountId") or payload.get("id") or "").strip()
                 top = max(1, min(int(payload.get("top") or FETCH_LIMIT_DEFAULT), 30))
-                accounts = [load_account(conn, account_id)] if account_id else conn.execute(
-                    "SELECT * FROM mail_accounts WHERE enabled = 1 ORDER BY created_at DESC"
-                ).fetchall()
+                if account_id:
+                    account = conn.execute("SELECT * FROM mail_accounts WHERE id = ?", (account_id,)).fetchone()
+                    if not account:
+                        raise ValueError("Account not found")
+                    accounts = [account]
+                else:
+                    accounts = conn.execute(
+                        "SELECT * FROM mail_accounts WHERE enabled = 1 ORDER BY created_at DESC"
+                    ).fetchall()
                 fetched = []
                 errors = []
                 for account in accounts:
@@ -2039,8 +2132,10 @@ class MailCodeHandler(BaseHTTPRequestHandler):
             if path == "/api/admin/accounts/delete":
                 account_id = str(payload.get("accountId") or payload.get("id") or "").strip()
                 if not account_id:
-                    raise RuntimeError("Missing accountId")
-                conn.execute("DELETE FROM mail_accounts WHERE id = ?", (account_id,))
+                    raise ValueError("Missing accountId")
+                cursor = conn.execute("DELETE FROM mail_accounts WHERE id = ?", (account_id,))
+                if cursor.rowcount < 1:
+                    raise ValueError("Account not found")
                 conn.commit()
                 json_response(self, 200, {
                     "ok": True,
@@ -2059,7 +2154,7 @@ class MailCodeHandler(BaseHTTPRequestHandler):
             if path == "/api/admin/grants/patch":
                 grant_id = str(payload.get("grantId") or payload.get("id") or "").strip()
                 if not grant_id:
-                    raise RuntimeError("Missing grantId")
+                    raise ValueError("Missing grantId")
                 grant = conn.execute("SELECT * FROM access_grants WHERE id = ?", (grant_id,)).fetchone()
                 if not grant:
                     raise ValueError("Access grant not found")
@@ -2096,7 +2191,7 @@ class MailCodeHandler(BaseHTTPRequestHandler):
             if path == "/api/admin/grants/regenerate":
                 grant_id = str(payload.get("grantId") or payload.get("id") or "").strip()
                 if not grant_id:
-                    raise RuntimeError("Missing grantId")
+                    raise ValueError("Missing grantId")
                 grant = conn.execute("SELECT * FROM access_grants WHERE id = ?", (grant_id,)).fetchone()
                 if not grant:
                     raise ValueError("Access grant not found")
@@ -2113,8 +2208,10 @@ class MailCodeHandler(BaseHTTPRequestHandler):
             if path == "/api/admin/grants/delete":
                 grant_id = str(payload.get("grantId") or payload.get("id") or "").strip()
                 if not grant_id:
-                    raise RuntimeError("Missing grantId")
-                conn.execute("DELETE FROM access_grants WHERE id = ?", (grant_id,))
+                    raise ValueError("Missing grantId")
+                cursor = conn.execute("DELETE FROM access_grants WHERE id = ?", (grant_id,))
+                if cursor.rowcount < 1:
+                    raise ValueError("Access grant not found")
                 conn.commit()
                 json_response(self, 200, {"ok": True, "grants": list_grants(conn)})
                 return

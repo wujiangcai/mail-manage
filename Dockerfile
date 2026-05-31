@@ -8,9 +8,12 @@ ENV MAIL_CODE_PORT=17373
 WORKDIR /app
 
 COPY app.py /app/app.py
+COPY cpa_support.py /app/cpa_support.py
 COPY static /app/static
 
-RUN useradd --create-home --shell /usr/sbin/nologin appuser
+RUN useradd --create-home --shell /usr/sbin/nologin appuser \
+    && mkdir -p /app/data \
+    && chown -R appuser:appuser /app/data
 USER appuser
 
 EXPOSE 17373

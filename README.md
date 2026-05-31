@@ -14,6 +14,7 @@ It provides:
 - Admin unified mail-record view across all imported mailboxes
 - Automatic mailbox polling with stored mail records
 - Webhook push when a new verification code is detected
+- CPA / Codex account 401 inspection, refresh-pool import, RT refresh, and CPA credential update
 - Hotmail / Outlook OAuth refresh-token fetching
 - Custom domain mailbox fetching over IMAP
 - Alias/catch-all mailbox fetching with recipient filtering
@@ -47,6 +48,15 @@ Admin page (`/admin`):
   HTML templates and CSS do not dominate the page.
 - Realtime refreshes stored account, grant, and message state while the page is open.
 - Create, disable, edit, delete, reset read count, and regenerate Access Codes.
+- Inspect CPA Codex/OpenAI auth files, detect 401 accounts, import them into a
+  refresh pool, refresh usable OpenAI RTs, and upload refreshed auth JSON back to
+  CPA.
+- Start a CPA OAuth flow and submit the real localhost callback after completing
+  the provider's normal login verification.
+
+CPA login verification is never bypassed. If a CPA auth file has no usable RT, or
+the RT is invalid, the account is marked as needing real login/OAuth verification
+instead of faking, skipping, or disabling SMS/OTP checks.
 
 ## Run Locally
 
@@ -89,6 +99,11 @@ Do not expose this service publicly without `MAIL_CODE_API_KEYS`.
 | `MAIL_CODE_USER_CODE_POLL_INTERVAL_SECONDS` | `5` | User page retry interval while waiting for a code. |
 | `MAIL_CODE_USER_CODE_POLL_TIMEOUT_SECONDS` | `90` | User page max wait time for automatic code polling. |
 | `MAIL_CODE_ADMIN_REFRESH_INTERVAL_SECONDS` | `10` | Admin page realtime refresh interval. |
+| `MAIL_CODE_ADMIN_MESSAGE_LIMIT` | `500` | Max stored messages loaded for a selected mailbox in the admin page. Capped at 5000. |
+| `MAIL_CODE_MAX_JSON_BODY_BYTES` | `5242880` | Max JSON request body size. Capped at 50 MiB. |
+| `OPENAI_CODEX_CLIENT_ID` | Codex client id | Client id used for OpenAI/Codex RT refresh. Usually leave unchanged. |
+| `OPENAI_OAUTH_REFRESH_SCOPE` | `openid profile email` | Scope sent when refreshing OpenAI/Codex RTs. |
+| `MAIL_CODE_CPA_PROBE_USER_AGENT` | Codex-like UA | User-Agent sent for CPA probe/refresh requests. |
 | `MAIL_CODE_WEBHOOK_URLS` | empty | Comma-separated webhook URLs called when a newly seen message contains a code. |
 | `MAIL_CODE_WEBHOOK_SECRET` | empty | Optional HMAC secret for webhook signatures. |
 | `MAIL_CODE_WEBHOOK_TIMEOUT_SECONDS` | `8` | Per-webhook request timeout. |
@@ -120,6 +135,96 @@ The service also runs an automatic polling worker by default. It periodically
 reads enabled mailboxes, stores newly seen message summaries, and triggers
 webhooks for newly detected verification codes. Set
 `MAIL_CODE_AUTO_POLL_INTERVAL_SECONDS=0` when you only want manual refresh.
+
+## CPA Account Inspection And Refresh
+
+The admin page includes a **CPA 巡检与刷新** panel for CPA/Codex credential
+maintenance. The CPA service must expose the management API used by
+`gpt-account-manager`, including:
+
+- `GET /v0/management/auth-files`
+- `GET /v0/management/auth-files/download?name=...`
+- `POST /v0/management/api-call`
+- `POST /v0/management/auth-files?name=...`
+- `GET /v0/management/codex-auth-url`
+- `POST /v0/management/oauth-callback`
+
+Typical flow:
+
+1. Open `/admin` and log in.
+2. In **CPA 巡检与刷新**, enter the CPA base URL, for example
+   `http://localhost:8317`, and the CPA management key.
+3. Click **巡检 401** to list Codex/OpenAI auth files that return 401.
+4. Click **导入刷新池** to store detected 401 items in the local
+   `cpa_refresh_queue` table.
+5. Click **刷新 RT 并更新 CPA**. Items with a valid OpenAI/Codex
+   `refresh_token` are refreshed through `https://auth.openai.com/oauth/token`;
+   the refreshed auth JSON is uploaded back to CPA.
+6. Items without a usable RT remain marked as needing real login verification.
+
+Operational notes:
+
+- CPA RT refresh is serialized in the backend. If another refresh is already
+  running, `/api/admin/cpa/refresh-rt` returns `409` instead of consuming the
+  same RTs concurrently.
+- Re-importing a 401 item without an RT does not overwrite a queued auth file
+  that already has a usable RT.
+- If a CPA auth file cannot be downloaded, the item is reported as a download
+  failure and is not treated as a login/SMS verification case.
+- The selected-mailbox message view is bounded by `MAIL_CODE_ADMIN_MESSAGE_LIMIT`
+  to keep large mail histories responsive. API JSON payloads are bounded by
+  `MAIL_CODE_MAX_JSON_BODY_BYTES`.
+
+OAuth flow:
+
+1. Click **CPA OAuth** to request a CPA Codex authorization URL.
+2. Open the URL and complete the provider's normal login, including SMS/OTP if
+   required.
+3. Paste the real `http://localhost/.../callback?code=...&state=...` callback
+   URL into **OAuth 回调地址**.
+4. Click **提交回调** so CPA can exchange and store the credential.
+
+The implementation intentionally does not skip SMS verification. It only
+refreshes existing valid RTs or hands the operator to the real OAuth/login flow.
+
+### CPA Admin API
+
+All CPA admin endpoints require the normal admin bearer token from
+`POST /api/admin/login`.
+
+- `GET /api/admin/cpa/queue?baseUrl=http://localhost:8317`
+  returns local refresh-pool rows.
+- `POST /api/admin/cpa/scan-401`
+  scans CPA auth files and returns 401 candidates.
+- `POST /api/admin/cpa/queue-401`
+  imports scan results into the local refresh pool.
+- `POST /api/admin/cpa/refresh-rt`
+  refreshes queued RTs and uploads successful results back to CPA by default.
+- `POST /api/admin/cpa/oauth/start`
+  requests a CPA OAuth authorization URL.
+- `POST /api/admin/cpa/oauth/callback`
+  submits the real localhost OAuth callback URL to CPA.
+
+Example scan request:
+
+```json
+{
+  "baseUrl": "http://localhost:8317",
+  "managementKey": "cpa-management-key",
+  "maxItems": 20
+}
+```
+
+Example refresh request:
+
+```json
+{
+  "baseUrl": "http://localhost:8317",
+  "managementKey": "cpa-management-key",
+  "limit": 20,
+  "updateCpa": true
+}
+```
 
 ## Admin Bulk Import Formats
 
