@@ -143,11 +143,13 @@ let clientConfig = {
   userCodePoll: { intervalSeconds: 5, timeoutSeconds: 90 },
 };
 let codePolling = false;
+let pageBusy = false;
 
 function setBusy(busy) {
-  $('loginBtn').disabled = busy;
-  $('fetchCodeBtn').disabled = busy || !token;
-  $('fetchMessagesBtn').disabled = busy || !token;
+  pageBusy = Boolean(busy);
+  $('loginBtn').disabled = pageBusy;
+  $('fetchCodeBtn').disabled = pageBusy || codePolling || !token;
+  $('fetchMessagesBtn').disabled = pageBusy || codePolling || !token;
 }
 
 function showMessage(message) {
@@ -212,10 +214,9 @@ function renderAccount(data) {
   const limit = grant.maxReads ? `${grant.readCount || 0}/${grant.maxReads}` : `${grant.readCount || 0}/不限`;
   const expires = grant.expiresAt ? `，到期 ${fmtTime(grant.expiresAt)}` : '';
   $('grantInfo').textContent = `已取 ${limit}${expires}`;
-  $('fetchCodeBtn').disabled = false;
-  $('fetchMessagesBtn').disabled = false;
   $('logoutBtn').classList.remove('hidden');
   setStatus('登录成功，可以获取验证码了');
+  setBusy(pageBusy);
 }
 
 async function api(path, body) {
@@ -332,8 +333,8 @@ async function waitForCode() {
   let attempt = 0;
 
   showMessage('');
-  setBusy(true);
   codePolling = true;
+  setBusy(true);
   setStatus('正在连接邮箱并查找最新验证码...');
   $('fetchCodeBtn').textContent = '等待中...';
   try {

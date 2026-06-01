@@ -739,6 +739,21 @@ def parse_bool(value, default=False):
     return default
 
 
+def parse_int(value, default=0, min_value=None, max_value=None, field_name="value"):
+    if value is None or str(value).strip() == "":
+        result = default
+    else:
+        try:
+            result = int(str(value).strip())
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"Invalid {field_name}: {value}") from exc
+    if min_value is not None:
+        result = max(min_value, result)
+    if max_value is not None:
+        result = min(max_value, result)
+    return result
+
+
 def is_custom_imap_payload(payload):
     provider = str(payload.get("provider") or payload.get("mailProvider") or "").strip().lower()
     if provider in {"imap", "custom-imap", "domain-imap", "domain"}:
@@ -1318,7 +1333,7 @@ def select_latest_code(messages, filters):
 
 
 def collect_messages(payload):
-    top = max(1, min(int(payload.get("top") or FETCH_LIMIT_DEFAULT), 30))
+    top = parse_int(payload.get("top"), default=FETCH_LIMIT_DEFAULT, min_value=1, max_value=30, field_name="top")
     mailboxes = payload.get("mailboxes") if isinstance(payload.get("mailboxes"), list) else [payload.get("mailbox") or "INBOX"]
     if is_custom_imap_payload(payload):
         return collect_custom_imap_messages(payload, mailboxes, top)
@@ -1609,7 +1624,7 @@ def admin_fetch_account_messages(conn, account, top=FETCH_LIMIT_DEFAULT, source=
 
 
 def poll_enabled_accounts_once(top=None, source="auto-poll"):
-    top = max(1, min(int(top or get_auto_poll_top()), 30))
+    top = parse_int(top, default=get_auto_poll_top(), min_value=1, max_value=30, field_name="top")
     fetched = []
     errors = []
     with db_connect() as conn:
@@ -1759,8 +1774,20 @@ def create_access_grant(conn, payload):
         raise ValueError("Account not found")
     access_code = f"mc_{secrets.token_urlsafe(18)}"
     timestamp = now_ms()
-    expires_in_days = int(payload.get("expiresInDays") or payload.get("expires_in_days") or 0)
+    expires_in_days = parse_int(
+        payload.get("expiresInDays") if payload.get("expiresInDays") is not None else payload.get("expires_in_days"),
+        default=0,
+        min_value=0,
+        max_value=3650,
+        field_name="expiresInDays",
+    )
     expires_at = timestamp + expires_in_days * 86400 * 1000 if expires_in_days > 0 else 0
+    max_reads = parse_int(
+        payload.get("maxReads") if payload.get("maxReads") is not None else payload.get("max_reads"),
+        default=0,
+        min_value=0,
+        field_name="maxReads",
+    )
     grant = {
         "id": generate_id("grant"),
         "name": str(payload.get("name") or "").strip(),
@@ -1768,7 +1795,7 @@ def create_access_grant(conn, payload):
         "account_id": account_id,
         "enabled": 1,
         "expires_at": expires_at,
-        "max_reads": max(0, int(payload.get("maxReads") or payload.get("max_reads") or 0)),
+        "max_reads": max_reads,
         "read_count": 0,
         "last_used_at": 0,
         "created_at": timestamp,
@@ -2095,7 +2122,7 @@ class MailCodeHandler(BaseHTTPRequestHandler):
 
             if path == "/api/admin/messages/fetch":
                 account_id = str(payload.get("accountId") or payload.get("id") or "").strip()
-                top = max(1, min(int(payload.get("top") or FETCH_LIMIT_DEFAULT), 30))
+                top = parse_int(payload.get("top"), default=FETCH_LIMIT_DEFAULT, min_value=1, max_value=30, field_name="top")
                 if account_id:
                     account = conn.execute("SELECT * FROM mail_accounts WHERE id = ?", (account_id,)).fetchone()
                     if not account:
@@ -2167,9 +2194,9 @@ class MailCodeHandler(BaseHTTPRequestHandler):
                     "enabled": ("enabled", lambda value: 1 if value else 0),
                     "name": ("name", str),
                     "accountId": ("account_id", str),
-                    "maxReads": ("max_reads", lambda value: max(0, int(value or 0))),
-                    "expiresAt": ("expires_at", lambda value: max(0, int(value or 0))),
-                    "readCount": ("read_count", lambda value: max(0, int(value or 0))),
+                    "maxReads": ("max_reads", lambda value: parse_int(value, default=0, min_value=0, field_name="maxReads")),
+                    "expiresAt": ("expires_at", lambda value: parse_int(value, default=0, min_value=0, field_name="expiresAt")),
+                    "readCount": ("read_count", lambda value: parse_int(value, default=0, min_value=0, field_name="readCount")),
                 }
                 assignments = []
                 values = []

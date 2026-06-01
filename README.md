@@ -48,6 +48,10 @@ Admin page (`/admin`):
   HTML templates and CSS do not dominate the page.
 - Realtime refreshes stored account, grant, and message state while the page is open.
 - Create, disable, edit, delete, reset read count, and regenerate Access Codes.
+- Empty-state actions are guarded: Access Code generation is disabled until at
+  least one mailbox exists, and "refresh all" is disabled until an enabled
+  mailbox exists.
+- Admins can explicitly log out, which clears the browser session token.
 - Inspect CPA Codex/OpenAI auth files, detect 401 accounts, import them into a
   refresh pool, refresh usable OpenAI RTs, and upload refreshed auth JSON back to
   CPA.
@@ -82,6 +86,31 @@ The compose file binds to `127.0.0.1:17373` by default. Put Nginx/Caddy/Cloudfla
 Tunnel in front of it for HTTPS.
 
 Do not expose this service publicly without `MAIL_CODE_API_KEYS`.
+
+## Admin And User Review Checklist
+
+Use this checklist after deployment or when changing mailbox settings:
+
+- Admin login: `/admin` accepts `MAIL_CODE_ADMIN_PASSWORD`; logout returns to
+  the login screen and removes the stored admin token.
+- Empty admin state: before importing mailboxes, Access Code generation and
+  bulk refresh controls should be disabled or show a clear "import mailbox
+  first" message.
+- Mailbox import: Hotmail lines and custom IMAP lines import without exposing
+  secrets in the table; imported aliases appear in mailbox and grant selectors.
+- Mail refresh: refreshing one selected mailbox updates its status and stored
+  records; refreshing all only processes enabled mailboxes.
+- Access Code lifecycle: generated `mc_...` codes are shown once, can be
+  disabled, edited, reset, regenerated, or deleted, and regenerated codes
+  invalidate the old code.
+- User login: `/` accepts only valid, enabled, unexpired Access Codes bound to
+  enabled mailboxes.
+- User fetching: while the page auto-waits for a code, fetch buttons stay
+  disabled to avoid duplicate mailbox reads or accidental read-count use.
+- User results: the latest code appears in the large code panel, recent mail is
+  shown as readable cards, and raw HTML/CSS-heavy previews are cleaned.
+- Limits and errors: invalid numeric values such as `top`, `maxReads`, or
+  expiry timestamps return clear 400 responses instead of generic server errors.
 
 ## Environment Variables
 

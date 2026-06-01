@@ -38,6 +38,8 @@
     .logo { width: 44px; height: 44px; border-radius: 8px; display: grid; place-items: center; background: #14213d; color: #fff; font-weight: 900; }
     .top-actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; justify-content: flex-end; }
     .top-link, .status-chip { display: inline-flex; align-items: center; min-height: 34px; border-radius: 8px; padding: 0 11px; border: 1px solid rgba(23,107,135,.18); background: #fff; color: #255066; font-size: 13px; font-weight: 800; text-decoration: none; }
+    .top-actions button.top-link { width: auto; min-height: 34px; padding: 0 11px; background: #fff; color: #255066; border-color: rgba(23,107,135,.18); box-shadow: none; }
+    .top-actions button.top-link:hover:not(:disabled) { background: var(--surface-soft); border-color: rgba(23,107,135,.32); color: #255066; }
     .login-wrap { min-height: calc(100vh - 150px); display: grid; place-items: center; }
     .login-card { width: min(460px, 100%); background: #fff; border: 1px solid var(--line); border-radius: 8px; padding: 24px; box-shadow: var(--shadow); }
     .dashboard-head { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 16px; align-items: end; margin-bottom: 14px; }
@@ -115,6 +117,7 @@
     <div class="top-actions">
       <span class="status-chip">实时刷新</span>
       <a class="top-link" href="/">用户取件页</a>
+      <button id="adminLogoutBtn" type="button" class="top-link hidden">退出</button>
     </div>
   </div>
 
@@ -363,6 +366,7 @@ let clientConfig = { adminRefreshIntervalSeconds: 10, autoPollEnabled: true, aut
 let realtimeTimer = null;
 let refreshing = false;
 const actionBusy = new Set();
+const busyButtons = new WeakSet();
 
 function cleanPreview(value) {
   return String(value || '')
@@ -398,10 +402,26 @@ function toDateInput(ms) {
 function fromDateInput(value) { return value ? new Date(value).getTime() : 0; }
 function setError(id, message) { $(id).textContent = message || ''; }
 function showDialogError(message) { alert(message); }
-function setBusy(button, busy) { button.disabled = busy; }
+function setBusy(button, busy) {
+  if (!button) return;
+  if (busy) busyButtons.add(button);
+  else busyButtons.delete(button);
+  button.disabled = Boolean(busy);
+  updateActionStates();
+}
 function adminMessageLimit() {
   const limit = Number(clientConfig.adminMessageLimit || 500);
   return Math.max(100, Math.min(limit, 5000));
+}
+
+function hasAccounts() { return state.accounts.length > 0; }
+function hasEnabledAccounts() { return state.accounts.some((account) => account.enabled); }
+function buttonBusy(button) { return button ? busyButtons.has(button) : false; }
+function updateActionStates() {
+  const accountReady = hasAccounts();
+  $('createGrantBtn').disabled = buttonBusy($('createGrantBtn')) || !accountReady;
+  $('fetchSelectedBtn').disabled = buttonBusy($('fetchSelectedBtn')) || !accountReady;
+  $('fetchAllBtn').disabled = buttonBusy($('fetchAllBtn')) || !hasEnabledAccounts();
 }
 
 async function api(path, body, method = 'POST') {
@@ -505,6 +525,7 @@ function renderSelects() {
 function render() {
   $('dashboard').classList.remove('hidden');
   $('loginPanel').classList.add('hidden');
+  $('adminLogoutBtn').classList.remove('hidden');
   $('statAccounts').textContent = state.accounts.length;
   $('statGrants').textContent = state.grants.length;
   $('statEnabled').textContent = state.accounts.filter((item) => item.enabled).length;
@@ -515,6 +536,7 @@ function render() {
   renderAccounts();
   renderGrants();
   renderCpaQueue();
+  updateActionStates();
 }
 
 function renderMessages() {
@@ -677,6 +699,19 @@ $('adminLoginBtn').addEventListener('click', async () => {
   }
 });
 
+$('adminLogoutBtn').addEventListener('click', () => {
+  adminToken = '';
+  localStorage.removeItem('mailCodeAdminToken');
+  if (realtimeTimer) clearInterval(realtimeTimer);
+  realtimeTimer = null;
+  state = { accounts: [], grants: [], messages: [], messageAccountId: '', cpaQueue: [], cpaScanItems: [], cpaOAuthState: '' };
+  $('dashboard').classList.add('hidden');
+  $('loginPanel').classList.remove('hidden');
+  $('adminLogoutBtn').classList.add('hidden');
+  $('adminPassword').value = '';
+  setError('loginError', '');
+});
+
 $('importBtn').addEventListener('click', async () => {
   setError('importError', '');
   setBusy($('importBtn'), true);
@@ -700,6 +735,10 @@ $('importBtn').addEventListener('click', async () => {
 $('createGrantBtn').addEventListener('click', async () => {
   setError('grantError', '');
   $('createdSecret').classList.add('hidden');
+  if (!hasAccounts()) {
+    setError('grantError', '请先导入邮箱账号，再生成 Access Code。');
+    return;
+  }
   setBusy($('createGrantBtn'), true);
   try {
     const data = await api('/api/admin/grants/create', {
@@ -719,12 +758,20 @@ $('createGrantBtn').addEventListener('click', async () => {
   }
 });
 $('fetchSelectedBtn').addEventListener('click', async () => {
+  if (!hasAccounts()) {
+    setError('messageError', '请先导入邮箱账号，再刷新邮件。');
+    return;
+  }
   setBusy($('fetchSelectedBtn'), true);
   try { await fetchMessages($('messageAccount').value); } catch (error) { setError('messageError', error.message); }
   finally { setBusy($('fetchSelectedBtn'), false); }
 });
 
 $('fetchAllBtn').addEventListener('click', async () => {
+  if (!hasEnabledAccounts()) {
+    setError('messageError', '没有启用中的邮箱账号可刷新。');
+    return;
+  }
   setBusy($('fetchAllBtn'), true);
   try { await fetchMessages(''); } catch (error) { setError('messageError', error.message); }
   finally { setBusy($('fetchAllBtn'), false); }
