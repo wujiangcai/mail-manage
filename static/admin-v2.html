@@ -220,7 +220,7 @@
           </div>
           <div class="panel-body">
             <label>CPA 地址
-              <input id="cpaBaseUrl" value="http://localhost:8317" />
+              <input id="cpaBaseUrl" value="http://localhost:8317" placeholder="Docker 可用 http://host.docker.internal:8317" />
             </label>
             <label>管理密钥
               <input id="cpaManagementKey" type="password" autocomplete="off" />
@@ -365,6 +365,7 @@ let state = { accounts: [], grants: [], messages: [], messageAccountId: '', cpaQ
 let clientConfig = { adminRefreshIntervalSeconds: 10, autoPollEnabled: true, autoPollIntervalSeconds: 60, adminMessageLimit: 500 };
 let realtimeTimer = null;
 let refreshing = false;
+let adminSessionVersion = 0;
 const actionBusy = new Set();
 const busyButtons = new WeakSet();
 
@@ -436,7 +437,15 @@ async function api(path, body, method = 'POST') {
   const text = await response.text();
   let data = {};
   try { data = text ? JSON.parse(text) : {}; } catch { data = { raw: text }; }
-  if (!response.ok || data.ok === false) throw new Error(data.error || text || `HTTP ${response.status}`);
+  if (!response.ok || data.ok === false) {
+    const error = new Error(data.error || text || `HTTP ${response.status}`);
+    error.status = response.status;
+    error.data = data;
+    if (error.status === 401 && adminToken && path !== '/api/admin/login') {
+      endAdminSession('登录已过期，请重新登录。');
+    }
+    throw error;
+  }
   return data;
 }
 
@@ -457,25 +466,97 @@ function cpaPayload(extra = {}) {
   };
 }
 
-async function loadCpaQueue() {
-  if (!adminToken) return;
+function emptyAdminState() {
+  return { accounts: [], grants: [], messages: [], messageAccountId: '', cpaQueue: [], cpaScanItems: [], cpaOAuthState: '' };
+}
+
+function setInputValue(id, value = '') {
+  const field = $(id);
+  if (field) field.value = value;
+}
+
+function clearSensitiveAdminFields() {
+  [
+    'adminPassword', 'importText', 'grantName', 'cpaManagementKey', 'cpaOAuthCallback',
+    'editAccountId', 'editAccountLabel', 'editAccountTarget', 'editAccountMailboxes',
+    'editAccountSenders', 'editAccountSubjects', 'editAccountKeywords', 'editGrantId',
+    'editGrantName', 'editGrantExpires', 'editGrantMaxReads', 'editGrantReadCount',
+  ].forEach((id) => setInputValue(id));
+  setInputValue('grantDays', '7');
+  setInputValue('grantMaxReads', '0');
+  const createdSecret = $('createdSecret');
+  if (createdSecret) {
+    createdSecret.textContent = '';
+    createdSecret.classList.add('hidden');
+  }
+  const cpaOAuthBox = $('cpaOAuthBox');
+  if (cpaOAuthBox) {
+    cpaOAuthBox.classList.add('hidden');
+    cpaOAuthBox.replaceChildren();
+  }
+  ['importError', 'grantError', 'messageError', 'cpaError'].forEach((id) => setError(id, ''));
+  ['accountDialog', 'grantDialog'].forEach((id) => {
+    const dialog = $(id);
+    if (dialog?.open) dialog.close();
+  });
+}
+
+function endAdminSession(message = '') {
+  adminToken = '';
+  adminSessionVersion += 1;
+  localStorage.removeItem('mailCodeAdminToken');
+  if (realtimeTimer) clearInterval(realtimeTimer);
+  realtimeTimer = null;
+  refreshing = false;
+  actionBusy.clear();
+  [
+    'adminLoginBtn', 'importBtn', 'createGrantBtn', 'fetchSelectedBtn', 'fetchAllBtn',
+    'cpaScanBtn', 'cpaQueueBtn', 'cpaRefreshBtn', 'cpaOAuthStartBtn', 'cpaOAuthCallbackBtn',
+  ].forEach((id) => setBusy($(id), false));
+  state = emptyAdminState();
+  clearSensitiveAdminFields();
+  $('dashboard').classList.add('hidden');
+  $('loginPanel').classList.remove('hidden');
+  $('adminLogoutBtn').classList.add('hidden');
+  setError('loginError', message);
+  updateActionStates();
+}
+
+function handleAdminApiError(error) {
+  if (error?.status === 401) {
+    endAdminSession('登录已过期，请重新登录。');
+    return true;
+  }
+  return false;
+}
+
+function isActiveAdminSession(version) {
+  return Boolean(adminToken) && version === adminSessionVersion;
+}
+
+async function loadCpaQueue(sessionVersion = adminSessionVersion) {
+  if (!isActiveAdminSession(sessionVersion)) return;
   const baseUrl = $('cpaBaseUrl')?.value?.trim() || '';
   const data = await api(`/api/admin/cpa/queue?baseUrl=${encodeURIComponent(baseUrl)}`, null, 'GET');
+  if (!isActiveAdminSession(sessionVersion)) return;
   state.cpaQueue = data.queue || [];
   renderCpaQueue();
 }
 
 async function refresh() {
-  if (refreshing) return;
+  if (refreshing || !adminToken) return;
   refreshing = true;
+  const sessionVersion = adminSessionVersion;
   try {
     const accountId = state.messageAccountId || $('messageAccount').value || '';
     const data = await api('/api/admin/overview', null, 'GET');
+    if (!isActiveAdminSession(sessionVersion)) return;
     const accounts = data.accounts || [];
     const messageAccountId = accountId && accounts.some((account) => account.id === accountId) ? accountId : '';
     let messages = data.messages || [];
     if (messageAccountId) {
       const messageData = await api(`/api/admin/messages?accountId=${encodeURIComponent(messageAccountId)}&limit=${adminMessageLimit()}`, null, 'GET');
+      if (!isActiveAdminSession(sessionVersion)) return;
       messages = messageData.messages || [];
     }
     state.accounts = accounts;
@@ -483,7 +564,7 @@ async function refresh() {
     state.messages = messages;
     state.messageAccountId = messageAccountId;
     render();
-    await loadCpaQueue().catch(() => {});
+    await loadCpaQueue(sessionVersion).catch(() => {});
   } finally {
     refreshing = false;
   }
@@ -498,7 +579,9 @@ function startRealtimeRefresh() {
   const intervalMs = Math.max(3, Number(clientConfig.adminRefreshIntervalSeconds || 10)) * 1000;
   realtimeTimer = setInterval(() => {
     if (!realtimeRefreshAllowed()) return;
-    refresh().catch(() => {});
+    refresh().catch((error) => {
+      handleAdminApiError(error);
+    });
   }, intervalMs);
 }
 
@@ -689,6 +772,7 @@ $('adminLoginBtn').addEventListener('click', async () => {
   try {
     const data = await api('/api/admin/login', { password: $('adminPassword').value });
     adminToken = data.token;
+    adminSessionVersion += 1;
     localStorage.setItem('mailCodeAdminToken', adminToken);
     await refresh();
     startRealtimeRefresh();
@@ -700,20 +784,15 @@ $('adminLoginBtn').addEventListener('click', async () => {
 });
 
 $('adminLogoutBtn').addEventListener('click', () => {
-  adminToken = '';
-  localStorage.removeItem('mailCodeAdminToken');
-  if (realtimeTimer) clearInterval(realtimeTimer);
-  realtimeTimer = null;
-  state = { accounts: [], grants: [], messages: [], messageAccountId: '', cpaQueue: [], cpaScanItems: [], cpaOAuthState: '' };
-  $('dashboard').classList.add('hidden');
-  $('loginPanel').classList.remove('hidden');
-  $('adminLogoutBtn').classList.add('hidden');
-  $('adminPassword').value = '';
-  setError('loginError', '');
+  endAdminSession();
 });
 
 $('importBtn').addEventListener('click', async () => {
   setError('importError', '');
+  if (!$('importText').value.trim()) {
+    setError('importError', '请先粘贴要导入的邮箱账号。');
+    return;
+  }
   setBusy($('importBtn'), true);
   try {
     const data = await api('/api/admin/accounts/import', {
@@ -1006,9 +1085,10 @@ document.addEventListener('click', async (event) => {
 loadClientConfig().then(() => {
   if (!adminToken) return;
   startRealtimeRefresh();
-  refresh().catch(() => {
-    adminToken = '';
-    localStorage.removeItem('mailCodeAdminToken');
+  refresh().catch((error) => {
+    if (!handleAdminApiError(error)) {
+      setError('loginError', error.message);
+    }
   });
 });
 </script>

@@ -85,32 +85,51 @@ docker compose up -d --build
 The compose file binds to `127.0.0.1:17373` by default. Put Nginx/Caddy/Cloudflare
 Tunnel in front of it for HTTPS.
 
-Do not expose this service publicly without `MAIL_CODE_API_KEYS`.
+The example `.env` values that start with `change-this` are rejected at startup;
+replace them before deploying. The compose file uses a named volume
+`mail-code-data` for SQLite data so the non-root container user can write the
+database reliably on Linux hosts.
+
+Do not expose this service directly to the public internet. `MAIL_CODE_API_KEYS`
+protect only the direct `/api/code` and `/api/messages` integrations; they do
+not protect `/admin` or the Access Code user portal. For public deployments,
+set strong admin/session/API secrets, use HTTPS, and restrict `/admin` at the
+reverse proxy whenever possible.
 
 ## Admin And User Review Checklist
 
 Use this checklist after deployment or when changing mailbox settings:
 
 - Admin login: `/admin` accepts `MAIL_CODE_ADMIN_PASSWORD`; logout returns to
-  the login screen and removes the stored admin token.
+  the login screen, removes the stored admin token, and ignores any in-flight
+  admin refresh responses from the previous browser session. Repeated failed
+  admin password attempts are rate-limited.
 - Empty admin state: before importing mailboxes, Access Code generation and
   bulk refresh controls should be disabled or show a clear "import mailbox
   first" message.
 - Mailbox import: Hotmail lines and custom IMAP lines import without exposing
-  secrets in the table; imported aliases appear in mailbox and grant selectors.
+  secrets in the table; blank import submissions and files with no valid account
+  lines are rejected with a clear error; imported aliases appear in mailbox and
+  grant selectors.
 - Mail refresh: refreshing one selected mailbox updates its status and stored
   records; refreshing all only processes enabled mailboxes.
 - Access Code lifecycle: generated `mc_...` codes are shown once, can be
   disabled, edited, reset, regenerated, or deleted, and regenerated codes
   invalidate the old code.
-- User login: `/` accepts only valid, enabled, unexpired Access Codes bound to
-  enabled mailboxes.
+- User login: `/` accepts only enabled, unexpired Access Codes bound to enabled
+  mailboxes. `maxReads` limits successful verification-code fetches.
 - User fetching: while the page auto-waits for a code, fetch buttons stay
-  disabled to avoid duplicate mailbox reads or accidental read-count use.
+  disabled to avoid duplicate mailbox reads; only a successful verification-code
+  fetch consumes `maxReads`, while viewing recent messages only updates the last
+  used time and remains available until the Access Code is disabled or expired.
+- User mailbox scope: user APIs return only messages that match the bound
+  mailbox/alias filters, and folder summaries never include raw unfiltered
+  messages.
 - User results: the latest code appears in the large code panel, recent mail is
   shown as readable cards, and raw HTML/CSS-heavy previews are cleaned.
-- Limits and errors: invalid numeric values such as `top`, `maxReads`, or
-  expiry timestamps return clear 400 responses instead of generic server errors.
+- Limits and errors: non-numeric values such as `top`, `maxReads`, or expiry
+  timestamps return clear 400 responses instead of generic server errors;
+  out-of-range values are clamped to the documented bounds.
 
 ## Environment Variables
 
@@ -119,9 +138,9 @@ Use this checklist after deployment or when changing mailbox settings:
 | `MAIL_CODE_HOST` | `127.0.0.1` local, `0.0.0.0` Docker | Bind host |
 | `MAIL_CODE_PORT` | `17373` | Bind port |
 | `MAIL_CODE_ADMIN_PASSWORD` | empty | Admin panel password. Required for `/admin`. |
-| `MAIL_CODE_SESSION_SECRET` | local fallback | Signing secret for admin/user sessions. Set a long random value. |
+| `MAIL_CODE_SESSION_SECRET` | local fallback | Signing secret for admin/user sessions. Set a long random value. Required when binding publicly; never reuse `MAIL_CODE_API_KEYS`. |
 | `MAIL_CODE_DB_PATH` | `./data/mail-code-helper.sqlite3` | SQLite database path. |
-| `MAIL_CODE_API_KEYS` | empty | Comma-separated API keys for direct `/api/code` and `/api/messages` calls. |
+| `MAIL_CODE_API_KEYS` | empty | Comma-separated API keys for direct `/api/code` and `/api/messages` calls. Does not protect `/admin`. |
 | `MAIL_CODE_ALLOWED_ORIGINS` | `*` | Comma-separated CORS origins |
 | `MAIL_CODE_AUTO_POLL_INTERVAL_SECONDS` | `60` | Background polling interval for enabled accounts. Set `0` to disable. |
 | `MAIL_CODE_AUTO_POLL_TOP` | `10` | Number of recent messages to read per mailbox during automatic polling. |
@@ -154,6 +173,11 @@ cannot be recovered later. Admins can disable it, edit its mailbox binding,
 change expiry/max reads, clear read count, or regenerate a new code. Regenerating
 immediately invalidates the old code.
 
+`maxReads` counts successful verification-code fetches. Opening the recent-mail
+view does not consume a read, and concurrent code fetches are guarded by a
+database-level conditional update so a one-read Access Code cannot be consumed
+successfully by multiple requests at the same time.
+
 The admin panel can refresh one mailbox or all enabled mailboxes. Fetched message
 summaries are stored in SQLite so the admin can review received mail records
 across accounts without logging into each mailbox provider. Stored previews are
@@ -182,7 +206,10 @@ Typical flow:
 
 1. Open `/admin` and log in.
 2. In **CPA 巡检与刷新**, enter the CPA base URL, for example
-   `http://localhost:8317`, and the CPA management key.
+   `http://localhost:8317`, and the CPA management key. In Docker, use a URL
+   reachable from the mail-code-helper container, such as
+   `http://host.docker.internal:8317` for a host service or the CPA compose
+   service name for same-network containers.
 3. Click **巡检 401** to list Codex/OpenAI auth files that return 401.
 4. Click **导入刷新池** to store detected 401 items in the local
    `cpa_refresh_queue` table.
@@ -203,6 +230,8 @@ Operational notes:
 - The selected-mailbox message view is bounded by `MAIL_CODE_ADMIN_MESSAGE_LIMIT`
   to keep large mail histories responsive. API JSON payloads are bounded by
   `MAIL_CODE_MAX_JSON_BODY_BYTES`.
+- CPA parameter errors such as missing `managementKey` or invalid `baseUrl`
+  return `400`; CPA service connection/HTTP failures return `502`.
 
 OAuth flow:
 
@@ -268,6 +297,10 @@ Custom domain IMAP:
 ```text
 alias@example.com----imap-username@example.com----app-password----imap.example.com----993
 ```
+
+Blank lines and comment lines starting with `#` are ignored. A submission with
+no valid account lines is rejected instead of reporting a successful zero-account
+import.
 
 For catch-all domain mailboxes, import one row per sellable alias. The service
 uses the imported email as `targetEmail`, so users only match messages sent to
@@ -418,8 +451,14 @@ server {
     location / {
         proxy_pass http://127.0.0.1:17373;
         proxy_set_header Host $host;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-For $remote_addr;
         proxy_set_header X-Forwarded-Proto https;
     }
 }
 ```
+
+For internet-facing deployments, put `/admin` behind a VPN, IP allowlist, or
+additional reverse-proxy authentication/rate limiting. The backend rate-limits
+failed admin password attempts by client IP, using `X-Forwarded-For` when the
+proxy supplies it, so configure the proxy to overwrite that header instead of
+passing untrusted client-provided values through.

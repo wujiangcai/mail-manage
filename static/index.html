@@ -144,11 +144,12 @@ let clientConfig = {
 };
 let codePolling = false;
 let pageBusy = false;
+let codeReadsExhausted = false;
 
 function setBusy(busy) {
   pageBusy = Boolean(busy);
   $('loginBtn').disabled = pageBusy;
-  $('fetchCodeBtn').disabled = pageBusy || codePolling || !token;
+  $('fetchCodeBtn').disabled = pageBusy || codePolling || !token || codeReadsExhausted;
   $('fetchMessagesBtn').disabled = pageBusy || codePolling || !token;
 }
 
@@ -200,10 +201,40 @@ function getRecipients(message) {
 }
 
 function findCode(message) {
+  if (message?.code) return String(message.code);
   const body = message?.body && typeof message.body === 'object' ? message.body.content : '';
   const text = [message?.subject, cleanPreview(message?.bodyPreview), cleanPreview(body)].join('\n');
   const match = String(text || '').match(/\b\d{4,8}\b/);
   return match ? match[0] : '';
+}
+
+function clearSession(message) {
+  token = '';
+  codeReadsExhausted = false;
+  localStorage.removeItem('mailCodeUserToken');
+  $('accountCard').classList.add('hidden');
+  $('accountEmail').textContent = '';
+  $('grantInfo').textContent = '';
+  $('code').textContent = '等待获取';
+  $('messageTable').classList.add('hidden');
+  ['msgSender', 'msgRecipients', 'msgSubject', 'msgTime', 'msgPreview'].forEach((id) => { $(id).textContent = ''; });
+  $('mailCount').textContent = '0';
+  $('codeCount').textContent = '0';
+  $('boxCount').textContent = '0';
+  $('mailList').innerHTML = '<div class="empty">暂无邮件</div>';
+  $('logoutBtn').classList.add('hidden');
+  setBusy(false);
+  if (message) showMessage(message);
+}
+
+function refreshAccountState() {
+  if (!token) return Promise.resolve();
+  return api('/api/user/me')
+    .then(renderAccount)
+    .catch((error) => {
+      clearSession(error.message || 'Access Code 已失效，请联系管理员');
+      setStatus('Access Code 已失效或已过期');
+    });
 }
 
 function renderAccount(data) {
@@ -211,11 +242,14 @@ function renderAccount(data) {
   $('accountCard').classList.remove('hidden');
   $('accountEmail').textContent = data.account.targetEmail || data.account.email || '(未命名邮箱)';
   const grant = data.grant || {};
-  const limit = grant.maxReads ? `${grant.readCount || 0}/${grant.maxReads}` : `${grant.readCount || 0}/不限`;
+  const readCount = Number(grant.readCount || 0);
+  const maxReads = Number(grant.maxReads || 0);
+  codeReadsExhausted = Boolean(maxReads && readCount >= maxReads);
+  const limit = maxReads ? `${readCount}/${maxReads}` : `${readCount}/不限`;
   const expires = grant.expiresAt ? `，到期 ${fmtTime(grant.expiresAt)}` : '';
   $('grantInfo').textContent = `已取 ${limit}${expires}`;
   $('logoutBtn').classList.remove('hidden');
-  setStatus('登录成功，可以获取验证码了');
+  setStatus(codeReadsExhausted ? '取码次数已用完，仍可查看最近邮件' : '登录成功，可以获取验证码了');
   setBusy(pageBusy);
 }
 
@@ -327,6 +361,11 @@ $('loginBtn').addEventListener('click', async () => {
 });
 
 async function waitForCode() {
+  if (codeReadsExhausted) {
+    showMessage('');
+    setStatus('取码次数已用完，仍可查看最近邮件');
+    return;
+  }
   const intervalMs = Math.max(2, Number(clientConfig.userCodePoll?.intervalSeconds || 5)) * 1000;
   const timeoutMs = Math.max(intervalMs, Number(clientConfig.userCodePoll?.timeoutSeconds || 90) * 1000);
   const startedAt = Date.now();
@@ -344,7 +383,7 @@ async function waitForCode() {
       const data = await api('/api/user/code', {});
       renderCode(data);
       if (data.code) {
-        api('/api/user/me').then(renderAccount).catch(() => {});
+        await refreshAccountState();
         setStatus(`已获取最新验证码，来源：${data.transport || data.provider || 'mail'}`);
         return;
       }
@@ -376,7 +415,7 @@ $('fetchMessagesBtn').addEventListener('click', async () => {
     renderMessages(await api('/api/user/messages', {}));
     showMessage('');
     setStatus('邮件读取完成，可点击邮件查看详情');
-    api('/api/user/me').then(renderAccount).catch(() => {});
+    await refreshAccountState();
   } catch (error) {
     showMessage(error.message);
     setStatus('读取邮件失败，请稍后重试');
@@ -386,16 +425,13 @@ $('fetchMessagesBtn').addEventListener('click', async () => {
 });
 
 $('logoutBtn').addEventListener('click', () => {
-  token = '';
-  localStorage.removeItem('mailCodeUserToken');
-  location.reload();
+  clearSession('');
+  $('accessCode').value = '';
+  setStatus('已退出');
 });
 
 if (token) {
-  api('/api/user/me').then(renderAccount).catch(() => {
-    token = '';
-    localStorage.removeItem('mailCodeUserToken');
-  });
+  refreshAccountState();
 }
 loadClientConfig();
 </script>

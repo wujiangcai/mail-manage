@@ -7,4 +7,7 @@ services:
     ports:
       - "127.0.0.1:17373:17373"
     volumes:
-      - ./data:/app/data
+      - mail-code-data:/app/data
+
+volumes:
+  mail-code-data:

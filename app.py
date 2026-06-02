@@ -29,8 +29,12 @@ DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 17373
 REQUEST_TIMEOUT_SECONDS = 45
 FETCH_LIMIT_DEFAULT = 10
+USER_FETCH_LIMIT_DEFAULT = 30
 TOKEN_TTL_SECONDS = 12 * 60 * 60
 ADMIN_TOKEN_TTL_SECONDS = 24 * 60 * 60
+ADMIN_LOGIN_WINDOW_SECONDS = 15 * 60
+ADMIN_LOGIN_MAX_FAILURES = 8
+ADMIN_LOGIN_LOCK_SECONDS = 5 * 60
 AUTO_POLL_INTERVAL_SECONDS_DEFAULT = 60
 AUTO_POLL_START_DELAY_SECONDS = 5
 WEBHOOK_TIMEOUT_SECONDS_DEFAULT = 8
@@ -38,6 +42,8 @@ DEFAULT_DB_PATH = Path(__file__).with_name("data").joinpath("mail-code-helper.sq
 ADMIN_MESSAGE_LIMIT_DEFAULT = 500
 MAX_JSON_BODY_BYTES_DEFAULT = 5 * 1024 * 1024
 CPA_REFRESH_LOCK = threading.Lock()
+ADMIN_LOGIN_LOCK = threading.Lock()
+ADMIN_LOGIN_FAILURES = {}
 
 LIVE_TOKEN_URL = "https://login.live.com/oauth20_token.srf"
 ENTRA_COMMON_TOKEN_URL = "https://login.microsoftonline.com/common/oauth2/v2.0/token"
@@ -421,7 +427,7 @@ def hash_secret(value):
 
 
 def get_signing_secret():
-    configured = os.environ.get("MAIL_CODE_SESSION_SECRET") or os.environ.get("MAIL_CODE_API_KEYS") or os.environ.get("MAIL_CODE_ADMIN_PASSWORD")
+    configured = os.environ.get("MAIL_CODE_SESSION_SECRET")
     return str(configured or "local-dev-mail-code-helper-secret")
 
 
@@ -477,6 +483,51 @@ def require_user_session(handler):
     return verify_token(get_bearer_token(handler), "user")
 
 
+def get_client_ip(handler):
+    forwarded_for = str(handler.headers.get("X-Forwarded-For") or "").split(",")[0].strip()
+    if forwarded_for:
+        return forwarded_for[:128]
+    try:
+        return str(handler.client_address[0] or "unknown")
+    except Exception:
+        return "unknown"
+
+
+def get_admin_login_retry_after(login_key):
+    timestamp = time.time()
+    with ADMIN_LOGIN_LOCK:
+        entry = ADMIN_LOGIN_FAILURES.get(login_key)
+        if not entry:
+            return 0
+        locked_until = float(entry.get("locked_until") or 0)
+        if locked_until > timestamp:
+            return max(1, int(locked_until - timestamp) + 1)
+        if locked_until or timestamp - float(entry.get("first_failed_at") or 0) > ADMIN_LOGIN_WINDOW_SECONDS:
+            ADMIN_LOGIN_FAILURES.pop(login_key, None)
+    return 0
+
+
+def record_admin_login_failure(login_key):
+    timestamp = time.time()
+    with ADMIN_LOGIN_LOCK:
+        entry = ADMIN_LOGIN_FAILURES.get(login_key)
+        if not entry or timestamp - float(entry.get("first_failed_at") or 0) > ADMIN_LOGIN_WINDOW_SECONDS:
+            entry = {"failures": 0, "first_failed_at": timestamp, "locked_until": 0}
+        entry["failures"] = int(entry.get("failures") or 0) + 1
+        if entry["failures"] >= ADMIN_LOGIN_MAX_FAILURES:
+            entry["locked_until"] = timestamp + ADMIN_LOGIN_LOCK_SECONDS
+        ADMIN_LOGIN_FAILURES[login_key] = entry
+        locked_until = float(entry.get("locked_until") or 0)
+        if locked_until > timestamp:
+            return max(1, int(locked_until - timestamp) + 1)
+    return 0
+
+
+def record_admin_login_success(login_key):
+    with ADMIN_LOGIN_LOCK:
+        ADMIN_LOGIN_FAILURES.pop(login_key, None)
+
+
 def get_admin_password():
     return str(os.environ.get("MAIL_CODE_ADMIN_PASSWORD") or "").strip()
 
@@ -486,6 +537,28 @@ def require_configured_admin_password():
     if not password:
         raise RuntimeError("MAIL_CODE_ADMIN_PASSWORD is not configured")
     return password
+
+
+def is_placeholder_secret(value):
+    normalized = str(value or "").strip().lower()
+    return not normalized or normalized.startswith("change-this")
+
+
+def validate_runtime_secrets(config):
+    admin_password = os.environ.get("MAIL_CODE_ADMIN_PASSWORD")
+    session_secret = os.environ.get("MAIL_CODE_SESSION_SECRET")
+    api_keys = get_api_keys()
+    public_bind = config["host"] in {"0.0.0.0", "::"}
+
+    if admin_password and is_placeholder_secret(admin_password):
+        raise RuntimeError("MAIL_CODE_ADMIN_PASSWORD still uses the .env.example placeholder")
+    if session_secret and is_placeholder_secret(session_secret):
+        raise RuntimeError("MAIL_CODE_SESSION_SECRET still uses the .env.example placeholder")
+    for key in api_keys:
+        if is_placeholder_secret(key):
+            raise RuntimeError("MAIL_CODE_API_KEYS still contains a .env.example placeholder")
+    if public_bind and not session_secret:
+        raise RuntimeError("MAIL_CODE_SESSION_SECRET is required when binding publicly")
 
 
 def safe_account(row):
@@ -528,6 +601,19 @@ def safe_grant(row, account=None):
         "createdAt": row["created_at"],
         "updatedAt": row["updated_at"],
         "account": safe_account(account) if account else None,
+    }
+
+
+def safe_user_account(row):
+    if not row:
+        return None
+    return {
+        "id": row["id"],
+        "provider": row["provider"],
+        "label": row["label"],
+        "email": row["email"],
+        "targetEmail": row["target_email"],
+        "mailboxes": json_loads(row["mailboxes"], []),
     }
 
 
@@ -1278,6 +1364,35 @@ def save_message_logs(conn, account_id, messages, filters=None):
     return rows
 
 
+def attach_codes_to_messages(messages, filters=None):
+    filters = filters or {}
+    code_patterns = filters.get("codePatterns") or []
+    enriched = []
+    for message in messages or []:
+        item = dict(message)
+        item["code"] = extract_code(get_message_search_text(message), code_patterns)[:64]
+        enriched.append(item)
+    return enriched
+
+
+def summarize_mailbox_results(mailbox_results, filtered_messages):
+    messages_by_mailbox = {}
+    for message in filtered_messages or []:
+        mailbox = normalize_mailbox_label(message.get("mailbox") or "INBOX")
+        messages_by_mailbox[mailbox] = messages_by_mailbox.get(mailbox, 0) + 1
+    summaries = []
+    for result in mailbox_results or []:
+        mailbox = normalize_mailbox_label(result.get("mailbox") or "INBOX")
+        summaries.append({
+            "mailbox": mailbox,
+            "count": messages_by_mailbox.get(mailbox, 0),
+        })
+    if not summaries:
+        for mailbox, count in sorted(messages_by_mailbox.items()):
+            summaries.append({"mailbox": mailbox, "count": count})
+    return summaries
+
+
 def select_latest_code(messages, filters):
     sender_keywords = [str(item).strip().lower() for item in filters.get("senderFilters") or [] if str(item).strip()]
     subject_keywords = [str(item).strip().lower() for item in filters.get("subjectFilters") or [] if str(item).strip()]
@@ -1340,22 +1455,35 @@ def collect_messages(payload):
     return collect_microsoft_messages(payload, mailboxes, top)
 
 
-def account_row_to_payload(row, extra_filters=None):
+def account_row_to_payload(row, extra_filters=None, allow_filter_overrides=True):
     extra_filters = extra_filters or {}
     mailboxes = json_loads(row["mailboxes"], ["INBOX"])
+    configured_sender_filters = json_loads(row["sender_filters"], [])
+    configured_subject_filters = json_loads(row["subject_filters"], [])
+    configured_required_keywords = json_loads(row["required_keywords"], [])
     payload = {
         "provider": row["provider"],
         "email": row["email"],
         "mailboxes": mailboxes,
         "top": extra_filters.get("top") or FETCH_LIMIT_DEFAULT,
-        "senderFilters": extra_filters.get("senderFilters") or json_loads(row["sender_filters"], []),
-        "subjectFilters": extra_filters.get("subjectFilters") or json_loads(row["subject_filters"], []),
-        "requiredKeywords": extra_filters.get("requiredKeywords") or json_loads(row["required_keywords"], []),
-        "recipientFilters": extra_filters.get("recipientFilters") or [],
-        "excludeCodes": extra_filters.get("excludeCodes") or [],
-        "filterAfterTimestamp": extra_filters.get("filterAfterTimestamp") or 0,
-        "codePatterns": extra_filters.get("codePatterns") or [],
+        "senderFilters": configured_sender_filters,
+        "subjectFilters": configured_subject_filters,
+        "requiredKeywords": configured_required_keywords,
+        "recipientFilters": [],
+        "excludeCodes": [],
+        "filterAfterTimestamp": 0,
+        "codePatterns": [],
     }
+    if allow_filter_overrides:
+        payload.update({
+            "senderFilters": extra_filters.get("senderFilters") or configured_sender_filters,
+            "subjectFilters": extra_filters.get("subjectFilters") or configured_subject_filters,
+            "requiredKeywords": extra_filters.get("requiredKeywords") or configured_required_keywords,
+            "recipientFilters": extra_filters.get("recipientFilters") or [],
+            "excludeCodes": extra_filters.get("excludeCodes") or [],
+            "filterAfterTimestamp": extra_filters.get("filterAfterTimestamp") or 0,
+            "codePatterns": extra_filters.get("codePatterns") or [],
+        })
     if row["provider"] == "custom-imap":
         payload.update({
             "provider": "custom-imap",
@@ -1391,12 +1519,12 @@ def load_grant_with_account(conn, grant_id):
     return grant, account
 
 
-def validate_grant(grant, account):
+def validate_grant(grant, account, enforce_read_limit=True):
     if not grant["enabled"]:
         raise PermissionError("This access code is disabled")
     if grant["expires_at"] and grant["expires_at"] < now_ms():
         raise PermissionError("This access code is expired")
-    if grant["max_reads"] and grant["read_count"] >= grant["max_reads"]:
+    if enforce_read_limit and grant["max_reads"] and grant["read_count"] >= grant["max_reads"]:
         raise PermissionError("This access code has no reads left")
     if not account["enabled"]:
         raise PermissionError("This mailbox is disabled")
@@ -1425,8 +1553,25 @@ def update_account_after_fetch(conn, account_id, result=None, error=None):
 
 def increment_grant_usage(conn, grant_id):
     timestamp = now_ms()
+    cursor = conn.execute(
+        """
+        UPDATE access_grants
+        SET read_count = read_count + 1, last_used_at = ?, updated_at = ?
+        WHERE id = ?
+          AND enabled = 1
+          AND (expires_at = 0 OR expires_at >= ?)
+          AND (max_reads = 0 OR read_count < max_reads)
+        """,
+        (timestamp, timestamp, grant_id, timestamp),
+    )
+    if cursor.rowcount != 1:
+        raise PermissionError("This access code has no reads left")
+
+
+def touch_grant_usage(conn, grant_id):
+    timestamp = now_ms()
     conn.execute(
-        "UPDATE access_grants SET read_count = read_count + 1, last_used_at = ?, updated_at = ? WHERE id = ?",
+        "UPDATE access_grants SET last_used_at = ?, updated_at = ? WHERE id = ?",
         (timestamp, timestamp, grant_id),
     )
 
@@ -1694,7 +1839,7 @@ def parse_import_lines(text, provider, options=None):
         account_id = generate_id("acct")
         if normalized_provider == "custom-imap":
             if len(parts) < 5:
-                raise RuntimeError("IMAP import line format: email----username----password----imapHost----imapPort")
+                raise ValueError("IMAP import line format: email----username----password----imapHost----imapPort")
             email_addr, username, password, imap_host, imap_port = parts[:5]
             imported.append({
                 "id": account_id,
@@ -1719,7 +1864,7 @@ def parse_import_lines(text, provider, options=None):
             })
         else:
             if len(parts) < 4:
-                raise RuntimeError("Hotmail import line format: email----password----clientId----refreshToken")
+                raise ValueError("Hotmail import line format: email----password----clientId----refreshToken")
             email_addr, password, client_id = parts[:3]
             refresh_token = "----".join(parts[3:]).strip()
             imported.append({
@@ -1931,6 +2076,8 @@ class MailCodeHandler(BaseHTTPRequestHandler):
                     json_response(self, 200, {"ok": True, "queue": cpa_support.list_queue(conn, base_url)})
             except PermissionError as exc:
                 json_response(self, 401, {"ok": False, "error": str(exc)})
+            except cpa_support.CpaConfigError as exc:
+                json_response(self, 400, {"ok": False, "error": str(exc)})
             except Exception as exc:
                 json_response(self, 500, {"ok": False, "error": str(exc)})
             return
@@ -1939,11 +2086,11 @@ class MailCodeHandler(BaseHTTPRequestHandler):
                 session = require_user_session(self)
                 with db_connect() as conn:
                     grant, account = load_grant_with_account(conn, session.get("grantId"))
-                    validate_grant(grant, account)
+                    validate_grant(grant, account, enforce_read_limit=False)
                     json_response(self, 200, {
                         "ok": True,
                         "grant": safe_grant(grant),
-                        "account": safe_account(account),
+                        "account": safe_user_account(account),
                     })
             except PermissionError as exc:
                 json_response(self, 401, {"ok": False, "error": str(exc)})
@@ -1958,9 +2105,27 @@ class MailCodeHandler(BaseHTTPRequestHandler):
             path = urlparse(self.path).path
             if path == "/api/admin/login":
                 password = str(payload.get("password") or "").strip()
+                login_key = get_client_ip(self)
+                retry_after = get_admin_login_retry_after(login_key)
+                if retry_after:
+                    json_response(self, 429, {
+                        "ok": False,
+                        "error": f"Too many admin login attempts; retry in {retry_after} seconds",
+                        "retryAfterSeconds": retry_after,
+                    })
+                    return
                 expected = require_configured_admin_password()
                 if not hmac.compare_digest(password, expected):
+                    retry_after = record_admin_login_failure(login_key)
+                    if retry_after:
+                        json_response(self, 429, {
+                            "ok": False,
+                            "error": f"Too many admin login attempts; retry in {retry_after} seconds",
+                            "retryAfterSeconds": retry_after,
+                        })
+                        return
                     raise PermissionError("Invalid admin password")
+                record_admin_login_success(login_key)
                 exp = int(time.time()) + ADMIN_TOKEN_TTL_SECONDS
                 token = sign_token({"kind": "admin", "exp": exp})
                 json_response(self, 200, {"ok": True, "token": token, "expiresAt": exp * 1000})
@@ -1978,7 +2143,7 @@ class MailCodeHandler(BaseHTTPRequestHandler):
                     if not grant:
                         raise PermissionError("Invalid access code")
                     account = load_account(conn, grant["account_id"])
-                    validate_grant(grant, account)
+                    validate_grant(grant, account, enforce_read_limit=False)
                     exp = int(time.time()) + TOKEN_TTL_SECONDS
                     token = sign_token({"kind": "user", "grantId": grant["id"], "accountId": account["id"], "exp": exp})
                     json_response(self, 200, {
@@ -1986,7 +2151,7 @@ class MailCodeHandler(BaseHTTPRequestHandler):
                         "token": token,
                         "expiresAt": exp * 1000,
                         "grant": safe_grant(grant),
-                        "account": safe_account(account),
+                        "account": safe_user_account(account),
                     })
                 return
 
@@ -2025,6 +2190,10 @@ class MailCodeHandler(BaseHTTPRequestHandler):
             json_response(self, 401, {"ok": False, "error": str(exc)})
         except ValueError as exc:
             json_response(self, 400, {"ok": False, "error": str(exc)})
+        except cpa_support.CpaConfigError as exc:
+            json_response(self, 400, {"ok": False, "error": str(exc)})
+        except cpa_support.CpaUpstreamError as exc:
+            json_response(self, 502, {"ok": False, "error": str(exc)})
         except Exception as exc:
             traceback.print_exc()
             json_response(self, 500, {"ok": False, "error": str(exc)})
@@ -2069,6 +2238,9 @@ class MailCodeHandler(BaseHTTPRequestHandler):
 
             if path == "/api/admin/accounts/import":
                 provider = str(payload.get("provider") or "hotmail").strip().lower()
+                import_text = str(payload.get("text") or "").strip()
+                if not import_text:
+                    raise ValueError("Import text is empty")
                 options = {
                     "label": str(payload.get("label") or "").strip(),
                     "mailboxes": payload.get("mailboxes") if isinstance(payload.get("mailboxes"), list) else None,
@@ -2076,7 +2248,9 @@ class MailCodeHandler(BaseHTTPRequestHandler):
                     "subjectFilters": payload.get("subjectFilters") if isinstance(payload.get("subjectFilters"), list) else None,
                     "requiredKeywords": payload.get("requiredKeywords") if isinstance(payload.get("requiredKeywords"), list) else None,
                 }
-                accounts = parse_import_lines(payload.get("text") or "", provider, options)
+                accounts = parse_import_lines(import_text, provider, options)
+                if not accounts:
+                    raise ValueError("No valid account lines found")
                 insert_accounts(conn, accounts)
                 conn.commit()
                 json_response(self, 200, {"ok": True, "imported": len(accounts), "accounts": list_accounts(conn)})
@@ -2248,11 +2422,13 @@ class MailCodeHandler(BaseHTTPRequestHandler):
     def handle_user_fetch(self, path, payload, session):
         with db_connect() as conn:
             grant, account = load_grant_with_account(conn, session.get("grantId"))
-            validate_grant(grant, account)
-            request_payload = account_row_to_payload(account, payload)
+            validate_grant(grant, account, enforce_read_limit=path == "/api/user/code")
+            user_top = parse_int(payload.get("top"), default=USER_FETCH_LIMIT_DEFAULT, min_value=1, max_value=30, field_name="top")
+            request_payload = account_row_to_payload(account, {"top": user_top}, allow_filter_overrides=False)
             try:
                 result = collect_messages(request_payload)
                 result["messages"] = filter_messages_for_payload(result.get("messages") or [], request_payload)
+                result["messages"] = attach_codes_to_messages(result.get("messages") or [], request_payload)
                 update_account_after_fetch(conn, account["id"], result=result)
                 log_rows = save_message_logs(conn, account["id"], result.get("messages") or [], request_payload)
             except Exception as exc:
@@ -2261,7 +2437,7 @@ class MailCodeHandler(BaseHTTPRequestHandler):
                 raise
 
             if path == "/api/user/messages":
-                increment_grant_usage(conn, grant["id"])
+                touch_grant_usage(conn, grant["id"])
                 conn.commit()
                 dispatch_code_webhooks(account, log_rows, source="user")
                 json_response(self, 200, {
@@ -2269,7 +2445,7 @@ class MailCodeHandler(BaseHTTPRequestHandler):
                     "provider": result.get("provider") or "",
                     "transport": result.get("transport") or "",
                     "messages": result.get("messages") or [],
-                    "mailboxResults": result.get("mailboxResults") or [],
+                    "mailboxResults": summarize_mailbox_results(result.get("mailboxResults") or [], result.get("messages") or []),
                 })
                 return
 
@@ -2290,6 +2466,7 @@ class MailCodeHandler(BaseHTTPRequestHandler):
 
 def main(argv=None):
     config = resolve_config(argv)
+    validate_runtime_secrets(config)
     init_db()
     if config["host"] in {"0.0.0.0", "::"} and not get_api_keys():
         log_info("WARNING: public bind without MAIL_CODE_API_KEYS is not recommended.")

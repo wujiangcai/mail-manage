@@ -19,6 +19,14 @@ CPA_PROBE_USER_AGENT = os.environ.get(
 ).strip()
 
 
+class CpaConfigError(RuntimeError):
+    pass
+
+
+class CpaUpstreamError(RuntimeError):
+    pass
+
+
 def now_ms():
     return int(time.time() * 1000)
 
@@ -132,9 +140,9 @@ def normalize_cpa_base_url(value):
 def validate_cpa_base_url(base_url):
     parsed = urlparse(base_url)
     if parsed.scheme not in {"http", "https"}:
-        raise RuntimeError("CPA 地址必须使用 http 或 https")
+        raise CpaConfigError("CPA 地址必须使用 http 或 https")
     if not parsed.hostname:
-        raise RuntimeError("CPA 地址缺少主机名")
+        raise CpaConfigError("CPA 地址缺少主机名")
 
 
 def config(payload):
@@ -143,7 +151,7 @@ def config(payload):
     )
     management_key = str(payload.get("management_key") or payload.get("managementKey") or "").strip()
     if not management_key:
-        raise RuntimeError("缺少 CPA 管理密钥")
+        raise CpaConfigError("缺少 CPA 管理密钥")
     validate_cpa_base_url(base_url)
     return base_url, management_key
 
@@ -180,9 +188,9 @@ def request_json(url, method="GET", json_data=None, request_headers=None, timeou
         except Exception:
             payload = {"error": raw}
         detail = payload.get("detail") or payload.get("error_description") or payload.get("error") or raw or str(exc)
-        raise RuntimeError(f"CPA HTTP {exc.code}: {compact_text(detail)}") from exc
+        raise CpaUpstreamError(f"CPA HTTP {exc.code}: {compact_text(detail)}") from exc
     except URLError as exc:
-        raise RuntimeError(f"CPA 请求失败: {compact_text(exc)}") from exc
+        raise CpaUpstreamError(f"CPA 请求失败: {compact_text(exc)}") from exc
 
 
 def nested_text(source, *keys):
@@ -208,7 +216,7 @@ def direct_oauth_start(payload):
         nested_text(result, "data", "url"), nested_text(result, "data", "auth_url"), nested_text(result, "data", "authUrl"),
     )
     if not authorize_url.startswith(("http://", "https://")):
-        raise RuntimeError("CPA 没有返回有效的 OAuth 授权链接")
+        raise CpaUpstreamError("CPA 没有返回有效的 OAuth 授权链接")
     state = first_text(
         nested_text(result, "state"), nested_text(result, "auth_state"), nested_text(result, "authState"),
         nested_text(result, "data", "state"), nested_text(result, "data", "auth_state"), nested_text(result, "data", "authState"),
@@ -228,17 +236,17 @@ def parse_localhost_oauth_callback(callback_url, expected_state=""):
     raw = str(callback_url or "").strip()
     parsed = urlparse(raw)
     if parsed.scheme not in {"http", "https"} or parsed.hostname not in {"localhost", "127.0.0.1"}:
-        raise RuntimeError("只接受真实 localhost / 127.0.0.1 OAuth 回调地址")
+        raise CpaConfigError("只接受真实 localhost / 127.0.0.1 OAuth 回调地址")
     query = parse_qs(parsed.query)
     error = first_text((query.get("error") or [""])[0], (query.get("error_description") or [""])[0])
     if error:
-        raise RuntimeError(f"OAuth 授权失败: {error}")
+        raise CpaConfigError(f"OAuth 授权失败: {error}")
     code = first_text((query.get("code") or [""])[0])
     state = first_text((query.get("state") or [""])[0])
     if not code or not state:
-        raise RuntimeError("OAuth 回调地址缺少 code 或 state")
+        raise CpaConfigError("OAuth 回调地址缺少 code 或 state")
     if expected_state and state != expected_state:
-        raise RuntimeError("OAuth 回调 state 与本轮授权不一致")
+        raise CpaConfigError("OAuth 回调 state 与本轮授权不一致")
     return {"url": urlunparse(parsed), "code": code, "state": state}
 
 
@@ -526,10 +534,10 @@ def session_to_auth(session, fallback=None, require_refresh_token=False):
         token.get("accessToken"), token.get("access_token"), credentials.get("access_token"),
     )
     if not access_token:
-        raise RuntimeError("Session JSON 缺少 access_token")
+        raise CpaUpstreamError("Session JSON 缺少 access_token")
     refresh_token = first_text(session.get("refreshToken"), session.get("refresh_token"), tokens.get("refreshToken"), tokens.get("refresh_token"))
     if require_refresh_token and not refresh_token:
-        raise RuntimeError("OpenAI OAuth 响应没有 refresh_token")
+        raise CpaUpstreamError("OpenAI OAuth 响应没有 refresh_token")
     session_token = first_text(session.get("sessionToken"), session.get("session_token"), tokens.get("sessionToken"), tokens.get("session_token"))
     id_token = first_text(session.get("idToken"), session.get("id_token"), tokens.get("idToken"), tokens.get("id_token"))
     payload = jwt_payload(access_token)
@@ -601,7 +609,7 @@ def refresh_openai_with_rt(refresh_token):
             payload = {"error": raw}
         return exc.code, payload if isinstance(payload, dict) else {"data": payload}, raw
     except URLError as exc:
-        raise RuntimeError(f"OpenAI RT 刷新请求失败: {compact_text(exc)}") from exc
+        raise CpaUpstreamError(f"OpenAI RT 刷新请求失败: {compact_text(exc)}") from exc
 
 
 def lifecycle_status_label(status):
