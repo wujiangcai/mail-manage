@@ -74,6 +74,12 @@ Open:
 http://127.0.0.1:17373/
 ```
 
+## Production Docs
+
+- [Deployment Guide](DEPLOY.md) covers server setup, Docker Compose, HTTPS reverse proxy, backups, upgrades, and troubleshooting.
+- [Security Notes](SECURITY.md) covers secret handling, admin protection, mailbox credential storage, webhook signing, and incident response.
+- [Release Checklist](RELEASE_CHECKLIST.md) provides a pre-launch checklist for git, local verification, production configuration, Docker, reverse proxy, functional checks, and rollback.
+
 ## Docker Deployment
 
 ```bash
